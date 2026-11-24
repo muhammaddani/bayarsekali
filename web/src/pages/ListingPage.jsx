@@ -11,7 +11,9 @@ import ApiListingPage from "./ApiListingPage.jsx";
 const DEVNET_RPC = "https://api.devnet.solana.com";
 
 function getProvider() {
-  if (typeof window !== "undefined" && window.solana) return window.solana;
+  if (typeof window === "undefined") return null;
+  if (window.phantom && window.phantom.solana) return window.phantom.solana;
+  if (window.solana) return window.solana;
   return null;
 }
 
@@ -60,11 +62,23 @@ export default function ListingPage({ id }) {
       return;
     }
     try {
-      const resp = await provider.connect();
+      const resp = await Promise.race([
+        provider.connect(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("wallet-timeout")), 20000)
+        ),
+      ]);
       setWalletAddress(resp.publicKey.toString());
       say("Wallet connected: " + resp.publicKey.toString());
-    } catch {
-      say("Wallet connection was rejected.", "err");
+    } catch (err) {
+      if (err && err.message === "wallet-timeout") {
+        say(
+          "The wallet did not answer within 20 seconds. Open the Phantom extension yourself and check whether a connection request is waiting there; approve or clear it, then press Connect Wallet again.",
+          "err"
+        );
+      } else {
+        say("Wallet connection was rejected.", "err");
+      }
     }
   }
 

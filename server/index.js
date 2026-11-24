@@ -30,6 +30,10 @@ const TOKEN_TTL_MS = 15 * 60 * 1000;
 await fs.mkdir(UPLOADS_DIR, { recursive: true });
 
 const app = express();
+// The app sits behind the Caddy reverse proxy in production, which
+// terminates HTTPS. Trust its forwarded headers so req.protocol
+// reports https and generated resource URLs carry the right scheme.
+app.set("trust proxy", true);
 app.use(cors());
 app.use(express.json());
 

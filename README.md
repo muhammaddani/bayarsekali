@@ -4,7 +4,7 @@ A paywall humans and AI agents can both pay. Files for people, API
 access for agents, settled on Solana through the x402 protocol. No
 accounts, no checkout forms, no platform cut.
 
-Live app: http://bayarsekali.indonesiacentral.cloudapp.azure.com:8787
+Live app: https://bayarsekali.indonesiacentral.cloudapp.azure.com
 
 Built for Dev3pack 2026 by Muhammad Dani Noar.
 
