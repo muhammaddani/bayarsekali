@@ -3,9 +3,15 @@ import {
   ComputeBudgetProgram,
   Connection,
   PublicKey,
+  Transaction,
+  TransactionInstruction,
   TransactionMessage,
   VersionedTransaction,
 } from "@solana/web3.js";
+
+const MEMO_PROGRAM_ID = new PublicKey(
+  "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+);
 import {
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountIdempotentInstruction,
@@ -130,15 +136,61 @@ function AgentBuyer({ listing, onPaid }) {
       const mint = new PublicKey(requirements.asset);
       const sourceAta = getAssociatedTokenAddressSync(mint, buyer);
       const destAta = getAssociatedTokenAddressSync(mint, recipient);
+      // The facilitator only pays network fees and rejects payment
+      // transactions that carry an account creation instruction, so a
+      // missing receiving USDC account is created first, in a
+      // separate transaction paid by the buyer wallet itself.
+      const destInfo = await connection.getAccountInfo(destAta);
+      if (!destInfo) {
+        addLog(
+          "The receiving USDC account does not exist yet. The agent creates it first, in a separate transaction paid by the buyer wallet."
+        );
+        const latestAta = await connection.getLatestBlockhash("confirmed");
+        const ataTx = new Transaction({
+          feePayer: buyer,
+          blockhash: latestAta.blockhash,
+          lastValidBlockHeight: latestAta.lastValidBlockHeight,
+        });
+        ataTx.add(
+          createAssociatedTokenAccountIdempotentInstruction(
+            buyer,
+            destAta,
+            recipient,
+            mint,
+            TOKEN_PROGRAM_ID
+          )
+        );
+        const sentAta = await provider.signAndSendTransaction(ataTx);
+        await connection.confirmTransaction(
+          {
+            signature: sentAta.signature,
+            blockhash: latestAta.blockhash,
+            lastValidBlockHeight: latestAta.lastValidBlockHeight,
+          },
+          "confirmed"
+        );
+        addLog("Receiving USDC account created.");
+      }
+      const sourceInfo = await connection.getAccountInfo(sourceAta);
+      if (!sourceInfo) {
+        throw new Error(
+          "Your wallet holds no devnet USDC yet. Claim free devnet USDC at faucet.circle.com (choose Solana, then Devnet), then run the agent again."
+        );
+      }
+      // The facilitator's static verification path accepts one exact
+      // instruction layout, in this relative order: compute unit
+      // limit, compute unit price, the TransferChecked, and a Memo
+      // carrying a random nonce of at least 16 bytes (hex encoded).
+      // Anything else makes the payment fall to the smart wallet
+      // path, which rejects standard wallets.
+      const nonceBytes = new Uint8Array(16);
+      window.crypto.getRandomValues(nonceBytes);
+      const nonce = Array.from(nonceBytes)
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
       const instructions = [
         ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
-        createAssociatedTokenAccountIdempotentInstruction(
-          feePayer,
-          destAta,
-          recipient,
-          mint,
-          TOKEN_PROGRAM_ID
-        ),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 }),
         createTransferCheckedInstruction(
           sourceAta,
           mint,
@@ -149,6 +201,11 @@ function AgentBuyer({ listing, onPaid }) {
           [],
           TOKEN_PROGRAM_ID
         ),
+        new TransactionInstruction({
+          programId: MEMO_PROGRAM_ID,
+          keys: [],
+          data: new TextEncoder().encode(nonce),
+        }),
       ];
       const { blockhash } = await connection.getLatestBlockhash("finalized");
       const message = new TransactionMessage({
