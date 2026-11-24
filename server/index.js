@@ -164,6 +164,33 @@ app.post("/api/listings", upload.single("file"), async (req, res) => {
   }
 });
 
+// Public catalog. Only display fields leave the server: never the
+// stored file name, never an API product's resourceContent.
+app.get("/api/listings", async (_req, res) => {
+  const listings = await store.listListings();
+  const publicListings = listings
+    .slice()
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .map((listing) =>
+      listing.type === "api"
+        ? {
+            id: listing.id,
+            type: "api",
+            title: listing.title,
+            priceUsdc: listing.priceUsdc,
+            createdAt: listing.createdAt,
+          }
+        : {
+            id: listing.id,
+            type: "file",
+            title: listing.title,
+            priceSol: listing.priceSol,
+            createdAt: listing.createdAt,
+          }
+    );
+  return res.json({ listings: publicListings });
+});
+
 // Public listing info. The stored file name and path are never
 // returned, and neither is an API product's resourceContent.
 app.get("/api/listings/:id", async (req, res) => {

@@ -224,3 +224,65 @@ button.secondary,
   line-height: 1.7;
   padding-left: 18px;
 }
+
+.section-title {
+  margin-top: 36px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+@media (max-width: 560px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.listing-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 16px;
+  text-decoration: none;
+  color: var(--text);
+}
+
+.listing-card:hover {
+  border-color: var(--accent);
+}
+
+.badge {
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  color: var(--muted);
+}
+
+.badge-api {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.listing-title {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.listing-price {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent);
+}

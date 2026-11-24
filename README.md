@@ -1,70 +1,86 @@
 # BayarSekali
 
-A paywall humans and AI agents can both pay. Files for people, API
-access for agents, settled on Solana through the x402 protocol. No
-accounts, no checkout forms, no platform cut.
+A micropayment paywall with two doors: one for humans, one for AI agents.
 
-Live app: https://bayarsekali.indonesiacentral.cloudapp.azure.com
+**Live:** https://bayarsekali.indonesiacentral.cloudapp.azure.com
+**Network:** Solana devnet. Every payment uses test funds with no real value.
 
-Built for Dev3pack 2026 by Muhammad Dani Noar.
+## The human door: files for SOL
 
-## Two doors, one paywall
+A creator lists a digital file with a price in SOL and gets a shareable link. A buyer opens the link, connects a Solana wallet, pays the exact amount, the backend verifies the payment on chain, and a one time download unlocks. No accounts. No platform cut. The money goes straight to the seller wallet.
 
-### The human door
+## The agent door: API access through x402
 
-A creator uploads a digital file, sets a price in SOL, and shares one
-link. The buyer connects a Solana wallet, pays the exact amount, and
-the download unlocks as soon as the payment is verified on chain.
+A creator lists API access with a price in USDC and gets a resource URL. Any x402 aware client, human or agent, that asks for the resource receives an HTTP 402 carrying the payment requirements. The client builds and signs a Solana transaction, retries with an `X-PAYMENT` header, a facilitator verifies and settles the payment on chain, and the server delivers the content in the same response. The buyer never pays network fees; the facilitator does.
 
-Checkout creates a payment intent with a fresh reference key (the
-Solana Pay pattern). The server finds the transaction by its
-reference, confirms it is finalized, and checks that the seller
-received at least the exact amount. Verification issues a one time
-download token, valid for 15 minutes and invalidated after a single
-use. The file is never exposed at a public URL.
+This door implements the x402 v2 `exact` scheme for Solana against the public facilitator at x402.org, including the parts that only show up when a real facilitator checks your work:
 
-### The agent door (x402 version 2, exact scheme)
+- The payment transaction must follow the static verification layout from section 3.1 of the SVM exact scheme spec, in relative order: `SetComputeUnitLimit`, `SetComputeUnitPrice`, a `TransferChecked`, and a Memo instruction carrying a random nonce of at least 16 bytes, hex encoded. Any other shape falls through to the smart wallet path and is rejected.
+- The facilitator pays network fees only. It will not fund account creation, so a missing recipient token account is created first, in a separate transaction paid by the buyer.
+- Settlement is confirmed on chain before the resource is served, and every settled payment is recorded as a sale on the listing.
 
-A creator sells API access per call: title, price per call in USDC,
-payout wallet, and the content to deliver. The app returns a paid
-endpoint URL.
+## Proof, not promises
 
-1. An agent requests the endpoint and receives HTTP 402 with the
-   standard payment requirements: scheme exact, network Solana
-   devnet (CAIP-2), asset the official devnet USDC mint, amount in
-   atomic units, payTo the seller, and the facilitator fee payer.
-2. The agent builds a USDC TransferChecked transaction whose fee
-   payer is the facilitator, signs it, and retries with the payment
-   in the X-PAYMENT header.
-3. The server checks the transaction structure locally, then the
-   x402 facilitator (x402.org) verifies it and settles it on chain,
-   co-signing as fee payer.
-4. Only after settlement is the content delivered, with the
-   settlement receipt in the X-PAYMENT-RESPONSE header. Every
-   settled call is recorded as a sale.
+An agent buyer settled a real 0.01 USDC payment for a dataset listing on this deployment. The facilitator paid the network fee; exactly 0.01 USDC moved to the seller token account.
 
-The listing page includes a working agent buyer demo that performs
-this handshake in the open, step by step.
+Transaction: https://explorer.solana.com/tx/5wXRwLGHiSMq5MQLZJ34vNxgFdGSPJAEWid1MCgxHwtVk5BxeKWXa4sJVEGMWnVien1ynSr1G9qZXecYbsurbeR3?cluster=devnet
 
-## Repository layout
+## The autonomous agent buyer
 
-    server/   Express API: listings, SOL payment verification,
-              the x402 resource server (x402.js), JSON store
-    web/      React and Vite frontend: storefront, listing pages,
-              the agent buyer demo
+`server/agent-buy.mjs` is a standalone agent client. It holds its own wallet, discovers the price by asking for the resource, signs the payment itself, and receives the content. No browser, no human in the loop.
+
+    cd server
+    npm install
+    AGENT_KEYPAIR=/path/to/agent-keypair.json node agent-buy.mjs https://bayarsekali.indonesiacentral.cloudapp.azure.com/api/resource/<listing-id>
+
+Fund the agent wallet with devnet USDC from faucet.circle.com (choose Solana, then Devnet). A little devnet SOL is only needed if a receiving token account has to be created first.
+
+The same flow also runs in the browser: every API listing page carries a step by step agent buyer demo that connects Phantom and settles a payment live.
+
+## How the human door verifies payments
+
+1. The buyer clicks Pay. The server creates a payment intent with a unique reference key.
+2. The buyer signs a SOL transfer in their browser wallet. The transfer goes straight to the seller wallet and carries the reference key as a read only account key, Solana Pay style.
+3. The server looks the reference up on devnet and confirms the recipient balance increased by at least the exact amount. The check reads the recipient balance delta, so it works for any recipient address.
+4. The server issues a one time download token, valid for 15 minutes and exactly one download.
+
+Payments are signed only in the buyer's own wallet. This project never asks for, stores, or uses any private key or seed phrase. The agent buyer's keypair lives in a local file owned by whoever runs the agent and is never sent anywhere.
+
+## Project layout
+
+    server/   Node and Express API on port 8787, plus the agent buyer CLI
+    web/      Vite and React frontend, served by the API in production
 
 ## Run it locally
 
-    cd web && npm install && npm run build
-    cd ../server && npm install && PORT=8787 npm start
+Terminal 1, the API:
 
-Then open http://localhost:8787. Payments run on Solana devnet:
-file listings take devnet SOL, API listings take devnet USDC from
-faucet.circle.com, and wallets must be set to devnet (in Phantom:
-Settings, Developer Settings, Testnet Mode).
+    cd server
+    npm install
+    npm start
 
-## What is next
+Terminal 2, the frontend:
 
-Mainnet deployment with real USDC, an on chain receipt program,
-seller accounts, metered pricing for API products, and an SDK so
-any agent framework can pay a BayarSekali endpoint in two lines.
+    cd web
+    npm install
+    npm run dev
+
+Open the Vite URL (usually http://localhost:5173). The dev server proxies /api to http://localhost:8787. For a production style run, `npm run build` in web/ and the API serves web/dist itself.
+
+## API summary
+
+    POST /api/listings                  create a listing: multipart file product, or JSON { type: "api", priceUsdc, resourceContent, ... }
+    GET  /api/listings                  public catalog, display fields only
+    GET  /api/listings/:id              public listing info, never the file path or resourceContent
+    GET  /api/listings/:id/sales        settled sales recorded for the listing
+    POST /api/listings/:id/checkout     create a SOL payment intent with a reference key
+    POST /api/payments/verify           body: { intentId } or { reference }
+    GET  /api/resource/:id              the x402 door: 402 without payment, content after settlement
+    GET  /api/download/:token           one time download, token dies after use or 15 minutes
+    GET  /api/health                    { ok: true }
+
+## Notes
+
+Listings, intents, tokens, and sales live in a small JSON file store under server/data, which is gitignored. Uploaded files live in server/uploads and are never served statically. In production the API runs as a systemd service behind Caddy with automatic HTTPS.
+
+Built for the Dev3pack hackathon, November 2026.

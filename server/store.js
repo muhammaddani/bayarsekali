@@ -75,6 +75,7 @@ async function update(name, predicate, patch) {
 export const store = {
   insertListing: (listing) => insert("listings", listing),
   getListing: (id) => find("listings", (l) => l.id === id),
+  listListings: () => readCollection("listings"),
 
   insertIntent: (intent) => insert("intents", intent),
   getIntentById: (id) => find("intents", (i) => i.id === id),
