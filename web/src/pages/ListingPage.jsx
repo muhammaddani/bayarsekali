@@ -263,50 +263,79 @@ export default function ListingPage({ id }) {
     return <ApiListingPage listing={listing} />;
   }
 
+  const shortSeller = listing.sellerWallet.slice(0, 4) + "…" + listing.sellerWallet.slice(-4);
   return (
-    <div>
-      <h1>{listing.title}</h1>
-      <div className="card">
-        <div className="price">{listing.priceSol} SOL</div>
-        <p className="pitch">
-          Solana devnet price. Devnet SOL has no real value. The payment goes
-          directly to the seller wallet below.
-        </p>
-        <p className="wallet">Seller: {listing.sellerWallet} · <a href={`/seller/${listing.sellerWallet}`}>seller dashboard</a></p>
-
-        {walletAddress ? (
-          <p className="wallet">Your wallet: {walletAddress}</p>
-        ) : (
-          <button type="button" onClick={connectWallet}>
-            Connect Wallet
-          </button>
-        )}
-
-        <button type="button" onClick={pay} disabled={busy || !walletAddress}>
-          {busy ? "Processing..." : "Pay " + listing.priceSol + " SOL"}
-        </button>
-
-        {savedIntent && !download ? (
-          <button type="button" className="secondary" onClick={recoverDownload} disabled={busy}>
-            Already paid? Get my download link again
-          </button>
-        ) : null}
-
-        {status ? <div className={"status " + statusKind}>{status}</div> : null}
-
-        {download ? (
-          <div>
-            <a className="button" href={download.downloadUrl}>
-              Download your file
-            </a>
-            <p className="pitch">
-              One time link that expires in 15 minutes. If the download breaks
-              off, the link keeps working. Lost it? Use "Already paid?" on this
-              page in the same browser.
-            </p>
-          </div>
-        ) : null}
+    <>
+      <div className="crumbs">
+        <a href="/#catalog">Catalog</a> / File
       </div>
-    </div>
+      <h1>{listing.title}</h1>
+      <div className="listing-layout">
+        <div>
+          <p className="lede">
+            A digital file, sold for SOL with one link. Pay from your Solana wallet and the
+            download unlocks as soon as the payment is verified on chain.
+          </p>
+          <div className="card">
+            <h3>How this checkout works</h3>
+            <ol className="steps">
+              <li>Connect a Solana wallet set to Devnet, with a little test SOL.</li>
+              <li>Approve one transfer straight to the seller. Nothing passes through us.</li>
+              <li>We find the payment on chain by its reference key and unlock a one time download.</li>
+            </ol>
+          </div>
+        </div>
+
+        <aside className="buybox">
+          <div className="card">
+            <div className="price">{listing.priceSol} SOL</div>
+            <dl className="meta-list">
+              <dt>Network</dt>
+              <dd>Solana devnet</dd>
+              <dt>Seller</dt>
+              <dd>
+                <a href={`/seller/${listing.sellerWallet}`}>{shortSeller}</a>
+              </dd>
+              {walletAddress ? (
+                <>
+                  <dt>You</dt>
+                  <dd>{walletAddress.slice(0, 4) + "…" + walletAddress.slice(-4)}</dd>
+                </>
+              ) : null}
+            </dl>
+
+            {walletAddress ? (
+              <button type="button" className="block" onClick={pay} disabled={busy}>
+                {busy ? "Processing…" : "Pay " + listing.priceSol + " SOL"}
+              </button>
+            ) : (
+              <button type="button" className="block" onClick={connectWallet}>
+                Connect wallet
+              </button>
+            )}
+
+            {savedIntent && !download ? (
+              <button type="button" className="secondary block" onClick={recoverDownload} disabled={busy}>
+                Already paid? Get the link again
+              </button>
+            ) : null}
+
+            {status ? <div className={"status " + statusKind}>{status}</div> : null}
+
+            {download ? (
+              <>
+                <a className="button block" href={download.downloadUrl}>
+                  Download the file
+                </a>
+                <p className="fineprint">
+                  One time link, valid for 15 minutes. If the download breaks off, the link
+                  keeps working. Lost it? Use “Already paid?” in this browser.
+                </p>
+              </>
+            ) : null}
+          </div>
+        </aside>
+      </div>
+    </>
   );
 }

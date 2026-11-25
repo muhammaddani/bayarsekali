@@ -94,7 +94,7 @@ export async function payForResource({
   onSend = () => {},
 }) {
   const buyer = keypair.publicKey;
-  log("step 1/4", `asking for ${resourceUrl} without paying`);
+  log("step 1/4", `GET ${resourceUrl} without payment`);
   const first = await fetch(resourceUrl);
   if (first.status === 200) {
     return { data: await first.text(), receipt: null, paid: false };
@@ -105,15 +105,15 @@ export async function payForResource({
   const required = await first.json();
   const requirements = required.accepts && required.accepts[0];
   if (!requirements) throw new Error("the 402 answer carried no payment requirements");
+  log(
+    "step 1/4",
+    `402 Payment Required: ${Number(requirements.amount) / 1e6} USDC (${requirements.amount} atomic) to ${requirements.payTo}, fee payer ${requirements.extra.feePayer}`
+  );
   await approve(requirements, required);
   const mint = new PublicKey(requirements.asset);
   const recipient = new PublicKey(requirements.payTo);
-  log(
-    "step 1/4",
-    `server demands ${requirements.amount} atomic units to ${requirements.payTo}, fee payer ${requirements.extra.feePayer}`
-  );
 
-  log("step 2/4", "building the payment and signing it");
+  log("step 2/4", "signing a USDC TransferChecked with a memo nonce");
   const sourceAta = getAssociatedTokenAddressSync(mint, buyer);
   const destAta = getAssociatedTokenAddressSync(mint, recipient);
   const sourceInfo = await connection.getAccountInfo(sourceAta);
@@ -155,9 +155,9 @@ export async function payForResource({
   const tx = buildPaymentTransaction({ requirements, buyer, blockhash });
   tx.sign([keypair]);
   const transaction = Buffer.from(tx.serialize()).toString("base64");
-  log("step 2/4", "signed. The buyer never pays network fees; the facilitator does.");
+  log("step 2/4", "signed; the facilitator pays the network fee, not the buyer");
 
-  log("step 3/4", "retrying with the X-PAYMENT header attached");
+  log("step 3/4", "GET again with the X-PAYMENT header");
   const paymentPayload = {
     x402Version: 2,
     resource: required.resource,
@@ -185,7 +185,7 @@ export async function payForResource({
       receipt = null;
     }
   }
-  log("step 4/4", `payment settled on chain${receipt && receipt.transaction ? `, transaction ${receipt.transaction}` : ""}`);
+  log("step 4/4", `200 OK, settled on Solana${receipt && receipt.transaction ? ` in ${receipt.transaction}` : ""}`);
   let data;
   try {
     data = JSON.parse(bodyText);

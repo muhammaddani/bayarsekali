@@ -1,9 +1,43 @@
 # BayarSekali
 
-A micropayment paywall with two doors: one for humans, one for AI agents.
+[![tests](https://github.com/muhammaddani/bayarsekali/actions/workflows/ci.yml/badge.svg)](https://github.com/muhammaddani/bayarsekali/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**The paywall AI agents can pay.** Sell data, APIs and digital products to people and AI agents, paid per use in USDC on Solana through the x402 protocol. Wrap an API you already run or upload a file, share one link, and every payment lands straight in your wallet. No accounts, no platform cut, settlement verified on chain before anything unlocks.
 
 **Live:** https://bayarsekali.indonesiacentral.cloudapp.azure.com
 **Network:** Solana devnet. Every payment uses test funds with no real value.
+
+## For judges: try it in 30 seconds
+
+1. Open the live site and press **Let the AI agent buy it**. A demo agent with its own devnet USDC wallet asks for a product, receives an HTTP 402, checks its spending limits, signs, and gets the content once the payment settles on Solana. Every step streams to the page, with the Explorer link at the end. No wallet or install needed.
+2. Open the [seller dashboard](https://bayarsekali.indonesiacentral.cloudapp.azure.com/seller/BW66pCspdPt8RH4bBGy8NGVSf2xMFNb3mr7FzWji8SML) in another tab and watch the sale land live.
+3. Want your own agent to shop? Add the MCP server (below) to Claude Desktop or Claude Code and ask it to buy something within a budget.
+
+## Why
+
+AI agents are becoming buyers, but they can not fill in a card form or open an account. Sellers, especially outside the US, struggle to get paid globally in small amounts. x402 lets any HTTP request carry a payment, and Solana settles it in seconds for a fraction of a cent. BayarSekali is the seller side of that: a paywall and API gateway any agent or person can pay. We start with Indonesia: local knowledge and data that AI agents need but can not buy today.
+
+## How it works
+
+```mermaid
+flowchart LR
+  A[AI agent or MCP client] -- GET resource --> S[BayarSekali server]
+  S -- 402 + price, USDC mint, fee payer --> A
+  A -- signed USDC transfer in X-PAYMENT --> S
+  S -- verify --> F[x402 facilitator]
+  S -- gateway mode: forward call --> U[Seller's own API]
+  S -- settle only after a good answer --> F
+  F -- transaction --> SOL[(Solana)]
+  S -- content + receipt --> A
+  S -- sale --> D[Live seller dashboard]
+  H[Person with a wallet] -- SOL transfer with reference key --> SOL
+  S -- verify transfer on chain, one time download --> H
+```
+
+## The x402 API gateway
+
+A seller lists an API they already run: its https URL and, optionally, a secret header such as their own API key. Every paid call is forwarded to that API with the buyer's query parameters, and the buyer is only charged when the API answers successfully: the payment is verified first, the API is called, and only a good answer is settled. The URL and secret never leave the server. Because the server fetches seller supplied URLs, the gateway is guarded against server side request forgery: https on the standard port only, no redirects, a timeout and a 1 MB limit, and every resolved address must be public, checked inside the socket's own DNS lookup so a rebinding hostname can not reach private or cloud metadata addresses.
 
 ## The human door: files for SOL
 
@@ -71,7 +105,11 @@ Then ask: "Find a content calendar for my small business on BayarSekali and buy 
 
 ## Seller dashboard
 
-There are no accounts in BayarSekali; the wallet is the identity. Every listing page links to a public dashboard at `/seller/<wallet>` showing all of that wallet's listings, every settled x402 sale with its explorer link, and the total USDC settled.
+There are no accounts in BayarSekali; the wallet is the identity. Every listing page links to a public dashboard at `/seller/<wallet>` showing all of that wallet's listings, a live sales feed of every settled x402 sale with its explorer link, and the exact USDC total. It refreshes every few seconds and highlights a sale the moment it lands.
+
+## Judge mode: the demo agent
+
+The live site carries a server side demo agent with its own devnet USDC wallet, so anyone can watch an agent pay without installing a wallet. It buys through exactly the same x402 flow as any external agent, streams every step to the page, and spends under hard limits: a per purchase cap, a daily budget counted from its recorded runs, an allowlist of sellers, one run at a time, and a per visitor rate limit. Enable it with `DEMO_AGENT_KEYPAIR` (a funded devnet keypair file), `DEMO_MAX_PER_PURCHASE_USDC`, `DEMO_DAILY_BUDGET_USDC` and `DEMO_ALLOWED_SELLERS`.
 
 ## Sellers sign in with their wallet
 
@@ -81,7 +119,7 @@ For scripts: `POST /api/auth/challenge { wallet }` returns `{ nonce, message }`;
 
 ## Tests
 
-The payment critical code is pinned by automated tests: money math, payment header parsing, the local transaction check that mirrors the facilitator, the replay registry semantics, one signature paying for one intent only, race safe token consumption, and the on chain lookup after a broken settle call. No network, no keys.
+The payment critical code is pinned by 44 automated tests: money math, payment header parsing, the local transaction check that mirrors the facilitator, the replay registry, one signature paying for one intent only, race safe tokens, the on chain lookup after a broken settle call, seller sign in, agent spending limits, the demo agent, and the gateway request guard. No network, no keys. CI runs them on every push.
 
     cd server
     npm test
@@ -124,7 +162,7 @@ Open the Vite URL (usually http://localhost:5173). The dev server proxies /api t
 ## API summary
 
     POST /api/auth/challenge            body: { wallet }; one time message for the seller wallet to sign
-    POST /api/listings                  create a listing (needs authNonce + authSignature): multipart file product, or JSON { type: "api", priceUsdc, resourceContent, ... }
+    POST /api/listings                  create a listing (needs authNonce + authSignature): multipart file product, or JSON { type: "api", priceUsdc, resourceContent | upstreamUrl [+ secretHeaderName, secretHeaderValue], ... }
     GET  /api/listings                  public catalog, display fields only
     GET  /api/listings/:id              public listing info, never the file path or resourceContent
     GET  /api/listings/:id/sales        settled sales recorded for the listing
@@ -132,6 +170,9 @@ Open the Vite URL (usually http://localhost:5173). The dev server proxies /api t
     POST /api/payments/verify           body: { intentId }; a paid intent gets a fresh download link (max 5)
     GET  /api/resource/:id              the x402 door: 402 without payment, content after settlement
     GET  /api/download/:token           one time download, token dies after use or 15 minutes
+    GET  /api/sellers/:wallet           live dashboard data: listings, sales newest first, exact USDC total
+    GET  /api/demo/status               judge mode demo agent: wallet, balance, limits, budget left today
+    POST /api/demo/agent-buy            body: { listingId }; the demo agent buys it, streamed as server sent events
     POST /api/rpc                       Solana JSON-RPC proxy for the browser, allowlisted read and send methods only
     GET  /api/health                    { ok: true }
 
@@ -140,3 +181,7 @@ Open the Vite URL (usually http://localhost:5173). The dev server proxies /api t
 Listings, intents, tokens, and sales live in a small JSON file store under server/data, which is gitignored. Uploaded files live in server/uploads and are never served statically. In production the API runs as a systemd service behind Caddy with automatic HTTPS.
 
 Built for the Dev3pack hackathon, November 2026.
+
+## License
+
+MIT, see [LICENSE](LICENSE). BayarSekali is open source.
