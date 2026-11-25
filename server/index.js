@@ -23,6 +23,8 @@ import {
   validateUpstreamUrl,
 } from "./upstream.js";
 import { readFileSync } from "node:fs";
+import { cleanListingMeta, metaOf, buildDiscoveryDocument, buildLlmsTxt } from "./discovery.js";
+import { createSampleApi } from "./sample-api.js";
 import { verifyPayment, solToLamports, getConnection } from "./verify.js";
 import {
   X402_VERSION,
@@ -288,6 +290,12 @@ app.post("/api/listings", listingLimiter, upload.single("file"), async (req, res
       if (!title || typeof title !== "string" || !title.trim()) {
         return res.status(400).json({ error: "Title is required." });
       }
+      let meta;
+      try {
+        meta = cleanListingMeta(req.body);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
       if (usdcToAtomic(priceUsdc) === null) {
         return res
           .status(400)
@@ -335,6 +343,7 @@ app.post("/api/listings", listingLimiter, upload.single("file"), async (req, res
         title: title.trim(),
         priceUsdc: String(priceUsdc).trim(),
         sellerWallet,
+        ...meta,
         ...delivery,
         resourceDescription:
           typeof resourceDescription === "string" ? resourceDescription : "",
@@ -355,6 +364,13 @@ app.post("/api/listings", listingLimiter, upload.single("file"), async (req, res
       await cleanup();
       return res.status(400).json({ error: "Title is required." });
     }
+    let meta;
+    try {
+      meta = cleanListingMeta(req.body);
+    } catch (err) {
+      await cleanup();
+      return res.status(400).json({ error: err.message });
+    }
     const price = Number(priceSol);
     if (solToLamports(price) === null) {
       await cleanup();
@@ -374,6 +390,7 @@ app.post("/api/listings", listingLimiter, upload.single("file"), async (req, res
       title: title.trim(),
       priceSol: price,
       sellerWallet,
+      ...meta,
       fileName: req.file.filename,
       originalName: req.file.originalname,
       createdAt: new Date().toISOString(),
@@ -399,6 +416,7 @@ function publicListing(listing) {
         id: listing.id,
         type: "api",
         title: listing.title,
+        ...metaOf(listing),
         priceUsdc: listing.priceUsdc,
         sellerWallet: listing.sellerWallet,
         mode: listing.mode === "proxy" ? "proxy" : "static",
@@ -408,6 +426,7 @@ function publicListing(listing) {
         id: listing.id,
         type: "file",
         title: listing.title,
+        ...metaOf(listing),
         priceSol: listing.priceSol,
         sellerWallet: listing.sellerWallet,
         createdAt: listing.createdAt,
@@ -489,6 +508,7 @@ app.get("/api/listings/:id", async (req, res) => {
       id: listing.id,
       type: "api",
       title: listing.title,
+      ...metaOf(listing),
       priceUsdc: listing.priceUsdc,
       sellerWallet: listing.sellerWallet,
       resourceUrl: "/api/resource/" + listing.id,
@@ -503,6 +523,7 @@ app.get("/api/listings/:id", async (req, res) => {
     id: listing.id,
     type: "file",
     title: listing.title,
+    ...metaOf(listing),
     priceSol: listing.priceSol,
     sellerWallet: listing.sellerWallet,
     createdAt: listing.createdAt,
@@ -882,6 +903,41 @@ app.get("/api/download/:token", async (req, res) => {
 app.use("/uploads", (_req, res) => {
   res.status(404).json({ error: "Not found." });
 });
+
+// Discovery for agents: every paid resource with the exact payment
+// requirements its 402 answers with, and a plain text guide for
+// language model agents. Both are built from the live catalog.
+const originOf = (req) => PUBLIC_BASE_URL || req.protocol + "://" + req.get("host");
+app.get("/.well-known/x402", async (req, res) => {
+  try {
+    const doc = await buildDiscoveryDocument({
+      listings: await store.listListings(),
+      origin: originOf(req),
+      requirementsFor: (listing, resourceUrl) =>
+        buildRequirements({
+          resourceUrl,
+          description: listing.resourceDescription || listing.title,
+          payTo: listing.sellerWallet,
+          amountAtomic: usdcToAtomic(listing.priceUsdc),
+        }),
+    });
+    res.json(doc);
+  } catch (err) {
+    console.error("discovery failed:", err);
+    res.status(500).json({ error: "Discovery is unavailable right now." });
+  }
+});
+app.get("/llms.txt", async (req, res) => {
+  const text = buildLlmsTxt({ listings: await store.listListings(), origin: originOf(req) });
+  res.type("text/plain; charset=utf-8").send(text);
+});
+
+// A sample seller API (Indonesian earthquake data from BMKG) that a
+// gateway listing can wrap. It has its own API key, held only by the
+// gateway listing as its secret header. Off unless SAMPLE_API_KEY is set.
+if (process.env.SAMPLE_API_KEY) {
+  app.use("/sample-api", createSampleApi({ apiKey: process.env.SAMPLE_API_KEY }));
+}
 
 // Serve the built frontend (web/dist) on the same origin when present,
 // so one deployment hosts both the page and the API. The API routes

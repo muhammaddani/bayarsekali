@@ -4,6 +4,8 @@ import { getProvider, signSellerChallenge } from "../solana.js";
 export default function CreateListing() {
   const [mode, setMode] = useState("file");
   const [title, setTitle] = useState("");
+  const [summaryEn, setSummaryEn] = useState("");
+  const [contentLanguage, setContentLanguage] = useState("en");
   const [priceSol, setPriceSol] = useState("");
   const [priceUsdc, setPriceUsdc] = useState("");
   const [sellerWallet, setSellerWallet] = useState("");
@@ -56,6 +58,8 @@ export default function CreateListing() {
           body: JSON.stringify({
             type: "api",
             title,
+            summaryEn,
+            contentLanguage,
             priceUsdc,
             sellerWallet,
             resourceDescription,
@@ -73,6 +77,8 @@ export default function CreateListing() {
         }
         const form = new FormData();
         form.append("title", title);
+        form.append("summaryEn", summaryEn);
+        form.append("contentLanguage", contentLanguage);
         form.append("priceSol", priceSol);
         form.append("sellerWallet", sellerWallet);
         form.append("authNonce", auth.authNonce);
@@ -140,6 +146,26 @@ export default function CreateListing() {
             mode === "api" ? "Example: Premium market report API" : "Example: Notion template pack"
           }
           required
+        />
+        <label htmlFor="contentLanguage">Language of the content</label>
+        <select
+          id="contentLanguage"
+          value={contentLanguage}
+          onChange={(e) => setContentLanguage(e.target.value)}
+        >
+          <option value="en">English</option>
+          <option value="id">Bahasa Indonesia</option>
+        </select>
+        <label htmlFor="summaryEn">
+          One line summary in English{contentLanguage === "en" ? " (optional)" : ", for buyers who don’t read it"}
+        </label>
+        <input
+          id="summaryEn"
+          type="text"
+          maxLength={200}
+          value={summaryEn}
+          onChange={(e) => setSummaryEn(e.target.value)}
+          placeholder="Example: 15 ready to paste AI prompts for running a small shop"
         />
         {mode === "file" ? (
           <>

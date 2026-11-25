@@ -12,7 +12,8 @@
 
 1. Open the live site and press **Let the AI agent buy it**. A demo agent with its own devnet USDC wallet asks for a product, receives an HTTP 402, checks its spending limits, signs, and gets the content once the payment settles on Solana. Every step streams to the page, with the Explorer link at the end. No wallet or install needed.
 2. Open the [seller dashboard](https://bayarsekali.indonesiacentral.cloudapp.azure.com/seller/BW66pCspdPt8RH4bBGy8NGVSf2xMFNb3mr7FzWji8SML) in another tab and watch the sale land live.
-3. Want your own agent to shop? Add the MCP server (below) to Claude Desktop or Claude Code and ask it to buy something within a budget.
+3. Agents can find everything for sale without a human: [/.well-known/x402](https://bayarsekali.indonesiacentral.cloudapp.azure.com/.well-known/x402) and [/llms.txt](https://bayarsekali.indonesiacentral.cloudapp.azure.com/llms.txt).
+4. Want your own agent to shop? Add the MCP server (below) to Claude Desktop or Claude Code and ask it to buy something within a budget.
 
 ## Why
 
@@ -38,6 +39,23 @@ flowchart LR
 ## The x402 API gateway
 
 A seller lists an API they already run: its https URL and, optionally, a secret header such as their own API key. Every paid call is forwarded to that API with the buyer's query parameters, and the buyer is only charged when the API answers successfully: the payment is verified first, the API is called, and only a good answer is settled. The URL and secret never leave the server. Because the server fetches seller supplied URLs, the gateway is guarded against server side request forgery: https on the standard port only, no redirects, a timeout and a 1 MB limit, and every resolved address must be public, checked inside the socket's own DNS lookup so a rebinding hostname can not reach private or cloud metadata addresses.
+
+### A live example: Indonesian earthquakes, in English
+
+The catalog carries a gateway listing that wraps a real seller API: `server/sample-api.js`, which serves the latest earthquakes in Indonesia from BMKG (Indonesia's meteorology and geophysics agency), with locations translated to English and typed fields (UTC time, magnitude, depth, coordinates, tsunami potential, felt reports by place). It is protected by its own API key, which only the gateway listing holds as its secret header, so the only way in without the key is to pay through BayarSekali. Buyers pass query parameters straight through: `?feed=significant|felt&min_magnitude=6&limit=5`. If BMKG does not answer, the sample API answers 502 and the buyer is not charged. Enable it with `SAMPLE_API_KEY`. Data: BMKG, https://data.bmkg.go.id.
+
+## Agents find the catalog on their own
+
+An agent does not need a human to hand it a link:
+
+- `GET /.well-known/x402` lists every paid resource with the exact payment requirements its 402 answers with (scheme, network, USDC mint, amount, payTo, fee payer), in the shape of an x402 discovery list, plus title, English summary, content language and delivery mode. A client can price everything before it asks for anything.
+- `GET /llms.txt` explains in plain text how to pay and lists the catalog, for language model agents.
+
+Both are built from the live catalog and never expose an API product's content, upstream URL or secret header.
+
+## Readable for buyers anywhere
+
+Content can be in any language; the listing says which. A seller can add a one line English summary and the content language, shown under the title across the site, returned by the MCP server's `list_products`, and published in discovery. Indonesian content stays Indonesian, and a buyer or agent elsewhere still knows what it is.
 
 ## The human door: files for SOL
 
@@ -119,7 +137,7 @@ For scripts: `POST /api/auth/challenge { wallet }` returns `{ nonce, message }`;
 
 ## Tests
 
-The payment critical code is pinned by 44 automated tests: money math, payment header parsing, the local transaction check that mirrors the facilitator, the replay registry, one signature paying for one intent only, race safe tokens, the on chain lookup after a broken settle call, seller sign in, agent spending limits, the demo agent, and the gateway request guard. No network, no keys. CI runs them on every push.
+The payment critical code is pinned by 55 automated tests: money math, payment header parsing, the local transaction check that mirrors the facilitator, the replay registry, one signature paying for one intent only, race safe tokens, the on chain lookup after a broken settle call, seller sign in, agent spending limits, the demo agent, the gateway request guard, agent discovery, and the sample seller API. No network, no keys. CI runs them on every push.
 
     cd server
     npm test
@@ -155,14 +173,16 @@ Terminal 2, the frontend:
     npm install
     npm run dev
 
-Optional environment: `PUBLIC_BASE_URL` (the public origin used in x402 resource URLs and in the seller sign in message, recommended behind a proxy), `SOLANA_RPC_URL` (the RPC the server uses, and the one the browser reaches through `/api/rpc`; the public devnet RPC rate limits hard, so use a free Helius devnet URL for demos, and the key never ships to the browser), and `DATA_DIR` (store location).
+Optional environment: `PUBLIC_BASE_URL` (the public origin used in x402 resource URLs and in the seller sign in message, recommended behind a proxy), `SOLANA_RPC_URL` (the RPC the server uses, and the one the browser reaches through `/api/rpc`; the public devnet RPC rate limits hard, so use a free Helius devnet URL for demos, and the key never ships to the browser), `DATA_DIR` (store location), and `SAMPLE_API_KEY` (turns on the sample seller API under /sample-api).
+
+To add an English summary and content language to listings created before these fields existed: `node tools/set-listing-meta.mjs <listing-id> --summary-en "..." --lang id` from server/.
 
 Open the Vite URL (usually http://localhost:5173). The dev server proxies /api to http://localhost:8787. For a production style run, `npm run build` in web/ and the API serves web/dist itself.
 
 ## API summary
 
     POST /api/auth/challenge            body: { wallet }; one time message for the seller wallet to sign
-    POST /api/listings                  create a listing (needs authNonce + authSignature): multipart file product, or JSON { type: "api", priceUsdc, resourceContent | upstreamUrl [+ secretHeaderName, secretHeaderValue], ... }
+    POST /api/listings                  create a listing (needs authNonce + authSignature): multipart file product, or JSON { type: "api", priceUsdc, resourceContent | upstreamUrl [+ secretHeaderName, secretHeaderValue], ... }; optional summaryEn, contentLanguage
     GET  /api/listings                  public catalog, display fields only
     GET  /api/listings/:id              public listing info, never the file path or resourceContent
     GET  /api/listings/:id/sales        settled sales recorded for the listing
@@ -175,6 +195,9 @@ Open the Vite URL (usually http://localhost:5173). The dev server proxies /api t
     POST /api/demo/agent-buy            body: { listingId }; the demo agent buys it, streamed as server sent events
     POST /api/rpc                       Solana JSON-RPC proxy for the browser, allowlisted read and send methods only
     GET  /api/health                    { ok: true }
+    GET  /.well-known/x402              every paid resource with its x402 payment requirements, for agents
+    GET  /llms.txt                      plain text guide and catalog for language model agents
+    GET  /sample-api/indonesia/earthquakes   sample seller API (needs its X-Api-Key), wrapped by a gateway listing
 
 ## Notes
 

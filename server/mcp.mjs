@@ -100,13 +100,15 @@ server.registerTool(
           id: l.id,
           type: l.type,
           title: l.title,
+          ...(l.summaryEn ? { summaryEn: l.summaryEn } : {}),
+          ...(l.contentLanguage ? { contentLanguage: l.contentLanguage } : {}),
           price: l.type === "api" ? `${l.priceUsdc} USDC per call` : `${l.priceSol} SOL`,
           buyableByAgent: l.type === "api",
           sellerWallet: l.sellerWallet,
           page: `${BASE_URL}/listing/${l.id}`,
         }));
       const lines = items.map(
-        (i) => `- ${i.id} | ${i.title} | ${i.price}${i.buyableByAgent ? "" : " (human checkout only)"}`
+        (i) => `- ${i.id} | ${i.title}${i.summaryEn ? ` (${i.summaryEn})` : ""}${i.contentLanguage && i.contentLanguage !== "en" ? ` [content in ${i.contentLanguage}]` : ""} | ${i.price}${i.buyableByAgent ? "" : " (human checkout only)"}`
       );
       return ok(
         items.length ? `${items.length} product(s):\n${lines.join("\n")}` : "The catalog is empty.",
