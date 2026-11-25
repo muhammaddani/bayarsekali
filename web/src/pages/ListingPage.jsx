@@ -1,14 +1,33 @@
 import { useEffect, useState } from "react";
 import {
-  Connection,
   PublicKey,
   SystemProgram,
   Transaction,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
 import ApiListingPage from "./ApiListingPage.jsx";
+import { getConnection } from "../solana.js";
 
-const DEVNET_RPC = "https://api.devnet.solana.com";
+// The intent id is the buyer's proof of purchase for this browser. It
+// is kept so the buyer can fetch a fresh download link later, after a
+// broken download or a closed tab.
+const intentKey = (listingId) => "bayarsekali:intent:" + listingId;
+
+function loadSavedIntent(listingId) {
+  try {
+    return window.localStorage.getItem(intentKey(listingId)) || "";
+  } catch {
+    return "";
+  }
+}
+
+function saveIntent(listingId, intentId) {
+  try {
+    window.localStorage.setItem(intentKey(listingId), intentId);
+  } catch {
+    // Storage blocked: the purchase still works, only recovery is lost.
+  }
+}
 
 function getProvider() {
   if (typeof window === "undefined") return null;
@@ -29,6 +48,7 @@ export default function ListingPage({ id }) {
   const [statusKind, setStatusKind] = useState("");
   const [busy, setBusy] = useState(false);
   const [download, setDownload] = useState(null);
+  const [savedIntent, setSavedIntent] = useState(() => loadSavedIntent(id));
 
   useEffect(() => {
     let cancelled = false;
@@ -107,8 +127,10 @@ export default function ListingPage({ id }) {
       if (!checkoutResp.ok) {
         throw new Error(intent.error || "Could not start checkout.");
       }
+      saveIntent(id, intent.intentId);
+      setSavedIntent(intent.intentId);
 
-      const connection = new Connection(DEVNET_RPC, "confirmed");
+      const connection = getConnection();
       const buyerKey = new PublicKey(walletAddress);
       const sellerKey = new PublicKey(intent.recipient);
       const referenceKey = new PublicKey(intent.reference);
@@ -160,6 +182,9 @@ export default function ListingPage({ id }) {
           body: JSON.stringify({ intentId: intent.intentId }),
         });
         const verifyData = await verifyResp.json();
+        if (verifyResp.status === 429) {
+          throw new Error(verifyData.error);
+        }
         if (verifyResp.ok && verifyData.paid) {
           verified = verifyData;
           break;
@@ -183,6 +208,36 @@ export default function ListingPage({ id }) {
       );
     } catch (err) {
       say(err.message || "Something went wrong during payment.", "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Ask the server for a fresh download link for an earlier purchase
+  // made in this browser.
+  async function recoverDownload() {
+    setBusy(true);
+    try {
+      say("Checking your earlier payment on chain.");
+      const resp = await fetch("/api/payments/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ intentId: savedIntent }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data.paid) {
+        setDownload(data);
+        say("Payment found. Here is a fresh download link.", "ok");
+      } else if (data.error) {
+        say(data.error, "err");
+      } else {
+        say(
+          "No completed payment was found for your earlier checkout in this browser.",
+          "err"
+        );
+      }
+    } catch {
+      say("Could not reach the server, try again.", "err");
     } finally {
       setBusy(false);
     }
@@ -231,6 +286,12 @@ export default function ListingPage({ id }) {
           {busy ? "Processing..." : "Pay " + listing.priceSol + " SOL"}
         </button>
 
+        {savedIntent && !download ? (
+          <button type="button" className="secondary" onClick={recoverDownload} disabled={busy}>
+            Already paid? Get my download link again
+          </button>
+        ) : null}
+
         {status ? <div className={"status " + statusKind}>{status}</div> : null}
 
         {download ? (
@@ -239,8 +300,9 @@ export default function ListingPage({ id }) {
               Download your file
             </a>
             <p className="pitch">
-              One time link. If it expires or was already used, pay again or
-              ask the seller for help.
+              One time link that expires in 15 minutes. If the download breaks
+              off, the link keeps working. Lost it? Use "Already paid?" on this
+              page in the same browser.
             </p>
           </div>
         ) : null}

@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   ComputeBudgetProgram,
-  Connection,
   PublicKey,
   Transaction,
   TransactionInstruction,
   TransactionMessage,
   VersionedTransaction,
 } from "@solana/web3.js";
+import { getConnection, waitForConfirmation } from "../solana.js";
 
 const MEMO_PROGRAM_ID = new PublicKey(
   "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
@@ -18,8 +18,6 @@ import {
   createTransferCheckedInstruction,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
-
-const DEVNET_RPC = "https://api.devnet.solana.com";
 
 function getProvider() {
   if (typeof window === "undefined") return null;
@@ -129,7 +127,7 @@ function AgentBuyer({ listing, onPaid }) {
       );
 
       addLog("Step 2 of 4: the agent builds the payment and asks the wallet to sign it.");
-      const connection = new Connection(DEVNET_RPC, "confirmed");
+      const connection = getConnection();
       const buyer = new PublicKey(walletAddress);
       const feePayer = new PublicKey(requirements.extra.feePayer);
       const recipient = new PublicKey(requirements.payTo);
@@ -161,13 +159,10 @@ function AgentBuyer({ listing, onPaid }) {
           )
         );
         const sentAta = await provider.signAndSendTransaction(ataTx);
-        await connection.confirmTransaction(
-          {
-            signature: sentAta.signature,
-            blockhash: latestAta.blockhash,
-            lastValidBlockHeight: latestAta.lastValidBlockHeight,
-          },
-          "confirmed"
+        await waitForConfirmation(
+          connection,
+          sentAta.signature,
+          latestAta.lastValidBlockHeight
         );
         addLog("Receiving USDC account created.");
       }

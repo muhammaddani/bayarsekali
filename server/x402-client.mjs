@@ -82,7 +82,17 @@ export function buildPaymentTransaction({ requirements, buyer, blockhash }) {
 // return the delivered content. Throws with the server's or the
 // facilitator's reason when the payment is rejected.
 // log(step, message) is an optional progress callback.
-export async function payForResource({ resourceUrl, keypair, connection, log = () => {} }) {
+// approve(requirements, challenge) is an optional guard called after
+// the server names its price and before anything is signed; throw from
+// it to refuse the payment (budgets, allowlists, asset checks).
+export async function payForResource({
+  resourceUrl,
+  keypair,
+  connection,
+  log = () => {},
+  approve = async () => {},
+  onSend = () => {},
+}) {
   const buyer = keypair.publicKey;
   log("step 1/4", `asking for ${resourceUrl} without paying`);
   const first = await fetch(resourceUrl);
@@ -93,7 +103,9 @@ export async function payForResource({ resourceUrl, keypair, connection, log = (
     throw new Error(`unexpected status ${first.status}: ${await first.text()}`);
   }
   const required = await first.json();
-  const requirements = required.accepts[0];
+  const requirements = required.accepts && required.accepts[0];
+  if (!requirements) throw new Error("the 402 answer carried no payment requirements");
+  await approve(requirements, required);
   const mint = new PublicKey(requirements.asset);
   const recipient = new PublicKey(requirements.payTo);
   log(
@@ -152,6 +164,9 @@ export async function payForResource({ resourceUrl, keypair, connection, log = (
     accepted: requirements,
     payload: { transaction },
   };
+  // From here on the signed payment leaves this process and may settle
+  // even if the answer is lost.
+  onSend();
   const paidResponse = await fetch(resourceUrl, {
     headers: {
       "X-PAYMENT": Buffer.from(JSON.stringify(paymentPayload)).toString("base64"),

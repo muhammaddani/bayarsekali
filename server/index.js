@@ -9,7 +9,9 @@ import { randomBytes } from "node:crypto";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { nanoid } from "nanoid";
 import { store } from "./store.js";
-import { verifyPayment, solToLamports } from "./verify.js";
+import { rateLimit } from "./ratelimit.js";
+import { createChallengeStore } from "./auth.js";
+import { verifyPayment, solToLamports, getConnection } from "./verify.js";
 import {
   X402_VERSION,
   usdcToAtomic,
@@ -21,12 +23,20 @@ import {
   facilitatorVerify,
   facilitatorSettle,
   paymentResponseHeader,
+  findSettlementOnChain,
 } from "./x402.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UPLOADS_DIR = path.join(__dirname, "uploads");
 const PORT = Number(process.env.PORT || 8787);
 const TOKEN_TTL_MS = 15 * 60 * 1000;
+// A paid intent may ask for a fresh download link this many times in
+// total, so a buyer whose download broke or whose tab closed is not
+// locked out, while a leaked intent id can not become a free mirror.
+const MAX_TOKENS_PER_INTENT = 5;
+// The public origin of this deployment, used in x402 resource URLs.
+// When unset, the request's own protocol and host are used.
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 
 await fs.mkdir(UPLOADS_DIR, { recursive: true });
 
@@ -52,8 +62,21 @@ const upload = multer({
   limits: { fileSize: 200 * 1024 * 1024 },
 });
 
+// Well known program addresses. Paying "to" one of these sends funds
+// where no seller can ever spend them, so they are refused as sellers.
+const PROGRAM_ADDRESSES = new Set([
+  "11111111111111111111111111111111",
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+  "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+  "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+  "ComputeBudget111111111111111111111111111111",
+  "SysvarRent111111111111111111111111111111111",
+]);
+
 function isValidWallet(value) {
   if (typeof value !== "string") return false;
+  if (PROGRAM_ADDRESSES.has(value)) return false;
   try {
     const key = new PublicKey(value);
     return key.toBase58() === value;
@@ -66,18 +89,112 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
+// Solana RPC proxy for the browser. The frontend sends its JSON-RPC
+// calls here, and the server forwards them to SOLANA_RPC_URL (for
+// example a Helius devnet URL), so the RPC key never ships in the
+// public bundle and demos do not hit the public devnet rate limits.
+// Only the handful of methods the checkout pages use are allowed.
+const RPC_URL = process.env.SOLANA_RPC_URL || "https://api.devnet.solana.com";
+const RPC_METHODS = new Set([
+  "getAccountInfo",
+  "getBalance",
+  "getBlockHeight",
+  "getLatestBlockhash",
+  "getSignatureStatuses",
+  "getTokenAccountBalance",
+  "sendTransaction",
+]);
+app.post(
+  "/api/rpc",
+  rateLimit({ windowMs: 60_000, max: 120, message: "Too many RPC calls, slow down." }),
+  async (req, res) => {
+    const call = req.body;
+    if (!call || Array.isArray(call) || !RPC_METHODS.has(call.method)) {
+      return res.status(400).json({
+        jsonrpc: "2.0",
+        id: (call && call.id) || null,
+        error: { code: -32601, message: "Method not allowed through this proxy." },
+      });
+    }
+    try {
+      const upstream = await fetch(RPC_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: call.id ?? 1,
+          method: call.method,
+          params: call.params ?? [],
+        }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      res.status(upstream.status).type("application/json").send(await upstream.text());
+    } catch (err) {
+      console.error("rpc proxy failed:", err.message);
+      res.status(502).json({
+        jsonrpc: "2.0",
+        id: call.id ?? null,
+        error: { code: -32000, message: "RPC upstream unavailable." },
+      });
+    }
+  }
+);
+
+// Seller sign in. The seller's wallet signs this one time message
+// (free, no transaction) and the signature goes along with the new
+// listing, proving the wallet that will receive the money is theirs.
+const challenges = createChallengeStore();
+const publicDomain = (req) =>
+  PUBLIC_BASE_URL ? new URL(PUBLIC_BASE_URL).host : req.get("host");
+
+app.post(
+  "/api/auth/challenge",
+  rateLimit({ windowMs: 60_000, max: 30 }),
+  (req, res) => {
+    const { wallet } = req.body || {};
+    if (!isValidWallet(wallet)) {
+      return res.status(400).json({ error: "wallet must be a valid Solana address." });
+    }
+    return res.json(challenges.issue({ domain: publicDomain(req), wallet }));
+  }
+);
+
 // Create a listing. Two product types share this route:
 // A file product arrives as multipart form fields title, priceSol,
 // sellerWallet, plus the product file in the "file" field.
 // An API product arrives as JSON: type "api", title, priceUsdc,
 // sellerWallet, and resourceContent, the payload served after an x402
 // payment. API products are paid in devnet USDC through the x402 flow.
-app.post("/api/listings", upload.single("file"), async (req, res) => {
+// Every listing needs a fresh signed challenge from sellerWallet:
+// fields authNonce and authSignature (base64 or base58).
+const listingLimiter = rateLimit({
+  windowMs: 60 * 60_000,
+  max: 20,
+  message: "Too many new listings from this address, try again later.",
+});
+app.post("/api/listings", listingLimiter, upload.single("file"), async (req, res) => {
   const cleanup = async () => {
     if (req.file) await fs.unlink(req.file.path).catch(() => {});
   };
   try {
-    const { title, priceSol, sellerWallet, type } = req.body || {};
+    const { title, priceSol, sellerWallet, type, authNonce, authSignature } =
+      req.body || {};
+
+    if (!isValidWallet(sellerWallet)) {
+      await cleanup();
+      return res
+        .status(400)
+        .json({ error: "sellerWallet must be a valid Solana address." });
+    }
+    const auth = challenges.consume({
+      nonce: authNonce,
+      wallet: sellerWallet,
+      signature: authSignature,
+    });
+    if (!auth.ok) {
+      await cleanup();
+      return res.status(401).json({ error: auth.reason });
+    }
 
     if (type === "api") {
       const { priceUsdc, resourceContent, resourceDescription } = req.body || {};
@@ -241,8 +358,8 @@ async function handleResource(req, res) {
   if (!listing || listing.type !== "api") {
     return res.status(404).json({ error: "Resource not found." });
   }
-  const resourceUrl =
-    req.protocol + "://" + req.get("host") + "/api/resource/" + listing.id;
+  const origin = PUBLIC_BASE_URL || req.protocol + "://" + req.get("host");
+  const resourceUrl = origin + "/api/resource/" + listing.id;
   const requirements = await buildRequirements({
     resourceUrl,
     description: listing.resourceDescription || listing.title,
@@ -279,15 +396,15 @@ async function handleResource(req, res) {
   if (!paymentKey) {
     return res.status(402).json({ error: "Payment rejected: unreadable transaction" });
   }
-  const PENDING_STALE_MS = 180_000;
-  const { claimed, record } = await store.claimPayment({
+  const claim = await store.claimPayment({
     paymentKey,
     listingId: listing.id,
     status: "pending",
     signature: null,
     createdAt: new Date().toISOString(),
   });
-  if (!claimed) {
+  if (!claim.claimed) {
+    const record = claim.record;
     if (record.status === "settled") {
       return res.status(402).json({
         error:
@@ -296,55 +413,79 @@ async function handleResource(req, res) {
             : "This payment has already been settled for a different resource.",
       });
     }
-    if (
-      record.status === "pending" &&
-      Date.now() - Date.parse(record.createdAt) < PENDING_STALE_MS
-    ) {
-      return res
-        .status(409)
-        .json({ error: "This payment is already being settled. Retry shortly." });
-    }
-    await store.updatePayment(paymentKey, {
-      status: "pending",
-      listingId: listing.id,
-      signature: null,
-      createdAt: new Date().toISOString(),
+    return res
+      .status(409)
+      .json({ error: "This payment is already being settled. Retry shortly." });
+  }
+  const finish = (patch) => store.finishPayment(paymentKey, patch).catch(() => {});
+  const markFailed = () => finish({ status: "failed" });
+
+  // When an earlier attempt with this very payment broke off mid
+  // settlement, or the settle call below breaks off, the payment may
+  // already be on chain. Look for it there before giving up, so a buyer
+  // who paid is never refused and never asked to pay twice.
+  const lookOnChain = () =>
+    findSettlementOnChain({
+      connection: getConnection(),
+      transactionBase64: payment.payload.transaction,
+      requirements,
+    }).catch((err) => {
+      console.error("on chain settlement lookup failed:", err);
+      return null;
     });
-  }
-  const markFailed = () =>
-    store.updatePayment(paymentKey, { status: "failed" }).catch(() => {});
 
-  let verification;
-  try {
-    verification = await facilitatorVerify(payment, requirements);
-  } catch (err) {
-    console.error("facilitator verify failed:", err);
-    await markFailed();
-    return res.status(502).json({ error: "Payment verification is unavailable." });
-  }
-  if (!verification.isValid) {
-    await markFailed();
-    return res
-      .status(402)
-      .json({ error: "Payment invalid: " + (verification.invalidReason || "unknown") });
+  let verification = null;
+  let settlement = null;
+  // Any earlier attempt (broken off, crashed, or refused after it may
+  // have raced a landing) means the chain is checked first.
+  if (claim.previous) {
+    const landed = await lookOnChain();
+    if (landed) {
+      settlement = { success: true, transaction: landed, network: requirements.network };
+    }
   }
 
-  let settlement;
-  try {
-    settlement = await facilitatorSettle(payment, requirements);
-  } catch (err) {
-    console.error("facilitator settle failed:", err);
-    await markFailed();
-    return res.status(502).json({ error: "Payment settlement is unavailable." });
-  }
-  if (!settlement.success) {
-    await markFailed();
-    return res
-      .status(502)
-      .json({ error: "Payment settlement failed: " + (settlement.errorReason || "unknown") });
+  if (!settlement) {
+    try {
+      verification = await facilitatorVerify(payment, requirements);
+    } catch (err) {
+      console.error("facilitator verify failed:", err);
+      await markFailed();
+      return res.status(502).json({ error: "Payment verification is unavailable." });
+    }
+    if (!verification.isValid) {
+      await markFailed();
+      return res
+        .status(402)
+        .json({ error: "Payment invalid: " + (verification.invalidReason || "unknown") });
+    }
+
+    try {
+      settlement = await facilitatorSettle(payment, requirements);
+    } catch (err) {
+      console.error("facilitator settle failed:", err);
+      const landed = await lookOnChain();
+      if (landed) {
+        settlement = { success: true, transaction: landed, network: requirements.network };
+      } else {
+        // Not "failed": the facilitator may still land it. A retry with
+        // the same X-PAYMENT header checks the chain first.
+        await finish({ status: "unknown" });
+        return res.status(502).json({
+          error:
+            "Payment settlement did not answer. Retry the same request in a minute; the same payment is never charged twice.",
+        });
+      }
+    }
+    if (!settlement.success) {
+      await markFailed();
+      return res
+        .status(502)
+        .json({ error: "Payment settlement failed: " + (settlement.errorReason || "unknown") });
+    }
   }
 
-  await store.updatePayment(paymentKey, {
+  await finish({
     status: "settled",
     signature: settlement.transaction || null,
   });
@@ -354,7 +495,7 @@ async function handleResource(req, res) {
     listingId: listing.id,
     kind: "x402",
     amountUsdc: listing.priceUsdc,
-    payer: settlement.payer || verification.payer || null,
+    payer: settlement.payer || (verification && verification.payer) || null,
     signature: settlement.transaction || null,
     createdAt: new Date().toISOString(),
   });
@@ -407,49 +548,18 @@ app.post("/api/listings/:id/checkout", async (req, res) => {
   });
 });
 
-// Verify a payment intent on chain. Body: { intentId } or { reference }.
-// On success the intent is marked paid and a one time download token is
-// issued. Calling verify again on a paid intent returns the same status
-// without issuing a second token.
-app.post("/api/payments/verify", async (req, res) => {
-  const { intentId, reference } = req.body || {};
-  let intent = null;
-  if (intentId) intent = await store.getIntentById(intentId);
-  if (!intent && reference) intent = await store.getIntentByReference(reference);
-  if (!intent) return res.status(404).json({ error: "Payment intent not found." });
-
-  if (intent.status === "paid") {
-    return res.json({ paid: true, status: "paid", alreadyVerified: true });
-  }
-
-  let result;
-  try {
-    result = await verifyPayment({
-      reference: intent.reference,
-      recipient: intent.recipient,
-      amountSol: intent.amountSol,
-    });
-  } catch (err) {
-    console.error("payment verification error:", err);
-    return res
-      .status(502)
-      .json({ paid: false, status: "pending", error: "RPC check failed, try again." });
-  }
-
-  if (!result.paid) {
-    return res.json({
-      paid: false,
-      status: "pending",
-      reason: result.reason,
-    });
-  }
-
-  await store.updateIntent(intent.id, {
-    status: "paid",
-    signature: result.signature,
-    paidAt: new Date().toISOString(),
-  });
-
+// Verify a payment intent on chain. Body: { intentId }.
+//
+// The intent id is the buyer's secret: only the browser that started
+// checkout ever sees it. The reference key is not accepted here,
+// because it is public on chain the moment the buyer pays, and anyone
+// watching the seller's wallet could otherwise claim the download.
+//
+// On success the intent is marked paid and a one time download token
+// is issued. Calling verify again on a paid intent issues a fresh token
+// (up to MAX_TOKENS_PER_INTENT in total), so a buyer whose download
+// broke off or whose tab closed can still get the file they paid for.
+async function issueDownloadToken(intent) {
   const tokenValue = randomBytes(24).toString("hex");
   const token = {
     token: tokenValue,
@@ -459,39 +569,99 @@ app.post("/api/payments/verify", async (req, res) => {
     expiresAt: new Date(Date.now() + TOKEN_TTL_MS).toISOString(),
     used: false,
   };
-  await store.insertToken(token);
+  return store.issueToken(token, MAX_TOKENS_PER_INTENT);
+}
 
-  return res.json({
+function paidResponse(intent, token) {
+  return {
     paid: true,
     status: "paid",
-    signature: result.signature,
-    downloadToken: tokenValue,
-    downloadUrl: "/api/download/" + tokenValue,
+    signature: intent.signature,
+    downloadToken: token.token,
+    downloadUrl: "/api/download/" + token.token,
     expiresAt: token.expiresAt,
-  });
+  };
+}
+
+app.post("/api/payments/verify", async (req, res) => {
+  const { intentId } = req.body || {};
+  if (typeof intentId !== "string" || !intentId) {
+    return res.status(400).json({ error: "intentId is required." });
+  }
+  let intent = await store.getIntentById(intentId);
+  if (!intent) return res.status(404).json({ error: "Payment intent not found." });
+
+  if (intent.status !== "paid") {
+    let result;
+    try {
+      result = await verifyPayment({
+        reference: intent.reference,
+        recipient: intent.recipient,
+        amountSol: intent.amountSol,
+        usedSignatures: await store.usedSignatures(),
+      });
+    } catch (err) {
+      console.error("payment verification error:", err);
+      return res
+        .status(502)
+        .json({ paid: false, status: "pending", error: "RPC check failed, try again." });
+    }
+
+    if (!result.paid) {
+      return res.json({
+        paid: false,
+        status: "pending",
+        reason: result.reason,
+      });
+    }
+
+    // Atomic: the signature is bound to this intent only if no other
+    // intent claimed it first, even when two verify calls race.
+    const marked = await store.markIntentPaid(intent.id, result.signature);
+    if (!marked.ok) {
+      return res.json({ paid: false, status: "pending", reason: marked.reason });
+    }
+    intent = marked.intent;
+  }
+
+  const token = await issueDownloadToken(intent);
+  if (!token) {
+    return res.status(429).json({
+      paid: true,
+      status: "paid",
+      signature: intent.signature,
+      error: "This purchase has used all of its download links. Contact the seller with your transaction signature.",
+    });
+  }
+  return res.json(paidResponse(intent, token));
 });
 
-// One time download. The token is invalidated before the file is sent,
-// so it can never be replayed, and it dies 15 minutes after issue.
+// One time download. The token is consumed atomically before the file
+// is sent, so it can never be replayed, and it dies 15 minutes after
+// issue. If the transfer itself fails, the token is given back, so a
+// dropped connection does not cost the buyer the purchase.
 app.get("/api/download/:token", async (req, res) => {
-  const token = await store.getToken(req.params.token);
-  if (!token || token.used) {
-    return res.status(404).json({ error: "Download link is invalid or already used." });
-  }
-  if (Date.now() > new Date(token.expiresAt).getTime()) {
-    await store.updateToken(token.token, { used: true });
+  const consumed = await store.consumeToken(req.params.token);
+  if (consumed.error === "expired") {
     return res.status(410).json({ error: "Download link has expired." });
   }
+  if (!consumed.token) {
+    return res.status(404).json({ error: "Download link is invalid or already used." });
+  }
+  const token = consumed.token;
   const listing = await store.getListing(token.listingId);
   if (!listing) {
+    await store.restoreToken(token.token).catch(() => {});
     return res.status(404).json({ error: "Listing not found." });
   }
 
-  await store.updateToken(token.token, { used: true });
   const filePath = path.join(UPLOADS_DIR, listing.fileName);
-  return res.download(filePath, listing.originalName, (err) => {
-    if (err && !res.headersSent) {
-      res.status(500).json({ error: "Could not send the file." });
+  return res.download(filePath, listing.originalName, async (err) => {
+    if (!err) return;
+    console.error("download failed:", err.code || err.message);
+    await store.restoreToken(token.token).catch(() => {});
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Could not send the file. The link still works; try again." });
     }
   });
 });
