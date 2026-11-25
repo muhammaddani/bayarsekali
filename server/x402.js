@@ -13,6 +13,7 @@
 // asset mint is Circle's official devnet USDC (6 decimals).
 
 import { createHash } from "node:crypto";
+import bs58 from "bs58";
 import { PublicKey, VersionedTransaction } from "@solana/web3.js";
 import {
   TOKEN_PROGRAM_ID,
@@ -200,6 +201,69 @@ export function localCheckTransaction(transactionBase64, requirements) {
     return { ok: false, reason: "destination mismatch" };
   }
   return { ok: true };
+}
+
+const MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+
+// The memo text and the buyer's signature of a payment transaction.
+// The memo carries the random nonce; the buyer's signature is fixed
+// the moment the buyer signs and survives the facilitator adding its
+// own fee payer signature, so it identifies this exact payment on
+// chain. Returns null when either is missing.
+export function paymentFingerprint(transactionBase64, feePayer) {
+  let tx;
+  try {
+    tx = VersionedTransaction.deserialize(Buffer.from(transactionBase64, "base64"));
+  } catch {
+    return null;
+  }
+  const keys = tx.message.staticAccountKeys;
+  const memoIx = tx.message.compiledInstructions.find(
+    (ix) => keys[ix.programIdIndex] && keys[ix.programIdIndex].toBase58() === MEMO_PROGRAM_ID
+  );
+  if (!memoIx) return null;
+  const memo = Buffer.from(memoIx.data).toString("utf8");
+  // Signers come first in the account keys, signatures in the same order.
+  let buyerSignature = null;
+  for (let i = 0; i < tx.message.header.numRequiredSignatures; i++) {
+    if (keys[i].toBase58() === feePayer) continue;
+    const sig = tx.signatures[i];
+    if (sig && sig.some((b) => b !== 0)) {
+      buyerSignature = bs58.encode(Buffer.from(sig));
+      break;
+    }
+  }
+  if (!buyerSignature) return null;
+  return { memo, buyerSignature };
+}
+
+// Look for this exact payment among the recent transactions of the
+// seller's token account. Used when a facilitator settle call broke off
+// without an answer: the payment may have landed anyway, and a buyer
+// who paid must not be refused. A match needs the same memo nonce AND
+// the buyer's own signature, so a forged transaction that copies
+// someone else's nonce can never match.
+// Returns the on chain signature or null.
+export async function findSettlementOnChain({ connection, transactionBase64, requirements }) {
+  const fingerprint = paymentFingerprint(transactionBase64, requirements.extra.feePayer);
+  if (!fingerprint) return null;
+  const destination = getAssociatedTokenAddressSync(
+    new PublicKey(requirements.asset),
+    new PublicKey(requirements.payTo)
+  );
+  const recent = await connection.getSignaturesForAddress(destination, { limit: 50 }, "confirmed");
+  for (const info of recent) {
+    if (info.err || !info.memo || !info.memo.includes(fingerprint.memo)) continue;
+    const tx = await connection.getTransaction(info.signature, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+    });
+    if (!tx || !tx.meta || tx.meta.err) continue;
+    if (tx.transaction.signatures.includes(fingerprint.buyerSignature)) {
+      return info.signature;
+    }
+  }
+  return null;
 }
 
 async function facilitatorPost(path, paymentPayload, paymentRequirements) {

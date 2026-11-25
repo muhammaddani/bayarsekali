@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { getProvider, signSellerChallenge } from "../solana.js";
 
 export default function CreateListing() {
   const [mode, setMode] = useState("file");
@@ -14,13 +15,35 @@ export default function CreateListing() {
   const [result, setResult] = useState(null);
   const [copied, setCopied] = useState("");
 
+  // The connected wallet is the seller identity: payments go to it, and
+  // it signs a free one time message to prove it is yours.
+  async function connectWallet() {
+    setError("");
+    const provider = getProvider();
+    if (!provider) {
+      setError("No Solana wallet was found in this browser. Install Phantom and open this page again.");
+      return;
+    }
+    try {
+      const resp = await provider.connect();
+      setSellerWallet(resp.publicKey.toString());
+    } catch {
+      setError("Wallet connection was rejected.");
+    }
+  }
+
   async function onSubmit(e) {
     e.preventDefault();
     setError("");
     setResult(null);
     setCopied("");
+    if (!sellerWallet) {
+      setError("Connect the wallet that should receive the payments first.");
+      return;
+    }
     setBusy(true);
     try {
+      const auth = await signSellerChallenge(getProvider(), sellerWallet);
       let resp;
       if (mode === "api") {
         resp = await fetch("/api/listings", {
@@ -33,6 +56,7 @@ export default function CreateListing() {
             sellerWallet,
             resourceDescription,
             resourceContent,
+            ...auth,
           }),
         });
       } else {
@@ -45,6 +69,8 @@ export default function CreateListing() {
         form.append("title", title);
         form.append("priceSol", priceSol);
         form.append("sellerWallet", sellerWallet);
+        form.append("authNonce", auth.authNonce);
+        form.append("authSignature", auth.authSignature);
         form.append("file", file);
         resp = await fetch("/api/listings", { method: "POST", body: form });
       }
@@ -52,7 +78,8 @@ export default function CreateListing() {
       if (!resp.ok) throw new Error(data.error || "Could not create the listing.");
       setResult(data);
     } catch (err) {
-      setError(err.message);
+      const rejected = err && (err.code === 4001 || /reject/i.test(err.message || ""));
+      setError(rejected ? "The wallet signature was declined, so no listing was created." : err.message);
     } finally {
       setBusy(false);
     }
@@ -134,15 +161,16 @@ export default function CreateListing() {
             />
           </>
         )}
-        <label htmlFor="wallet">Your Solana wallet address (receives the payment)</label>
-        <input
-          id="wallet"
-          type="text"
-          value={sellerWallet}
-          onChange={(e) => setSellerWallet(e.target.value)}
-          placeholder="Paste your devnet wallet address"
-          required
-        />
+        <label>Your wallet (receives the payment)</label>
+        {sellerWallet ? (
+          <p className="wallet">
+            {sellerWallet} · signs a free message on create, no transaction
+          </p>
+        ) : (
+          <button type="button" className="secondary" onClick={connectWallet}>
+            Connect wallet
+          </button>
+        )}
         {mode === "file" ? (
           <>
             <label htmlFor="file">Product file</label>
@@ -177,7 +205,7 @@ export default function CreateListing() {
           </>
         )}
         <button type="submit" disabled={busy}>
-          {busy ? "Creating..." : "Create listing"}
+          {busy ? "Waiting for wallet signature..." : "Sign and create listing"}
         </button>
         {error ? <div className="status err">{error}</div> : null}
       </form>
