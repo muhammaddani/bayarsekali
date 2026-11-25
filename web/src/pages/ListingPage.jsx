@@ -217,7 +217,7 @@ export default function ListingPage({ id }) {
           Solana devnet price. Devnet SOL has no real value. The payment goes
           directly to the seller wallet below.
         </p>
-        <p className="wallet">Seller: {listing.sellerWallet}</p>
+        <p className="wallet">Seller: {listing.sellerWallet} · <a href={`/seller/${listing.sellerWallet}`}>seller dashboard</a></p>
 
         {walletAddress ? (
           <p className="wallet">Your wallet: {walletAddress}</p>

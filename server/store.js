@@ -12,6 +12,7 @@ const FILES = {
   intents: path.join(DATA_DIR, "intents.json"),
   tokens: path.join(DATA_DIR, "tokens.json"),
   sales: path.join(DATA_DIR, "sales.json"),
+  payments: path.join(DATA_DIR, "payments.json"),
 };
 
 async function ensureDataDir() {
@@ -93,4 +94,24 @@ export const store = {
     const rows = await readCollection("sales");
     return rows.filter((s) => s.listingId === listingId);
   },
+
+  // The x402 replay registry. One record per payment transaction,
+  // keyed by the hash of its serialized bytes. A record is claimed as
+  // "pending" before the facilitator is called, then lands as
+  // "settled" or "failed". Only a settled record spends the payment.
+  // The claim is one serialized read modify write, so two requests
+  // carrying the same payment can never both claim it.
+  claimPayment: (record) =>
+    serialized(async () => {
+      const rows = await readCollection("payments");
+      const existing = rows.find((p) => p.paymentKey === record.paymentKey);
+      if (existing) return { claimed: false, record: existing };
+      rows.push(record);
+      await writeCollection("payments", rows);
+      return { claimed: true, record };
+    }),
+  getPayment: (paymentKey) =>
+    find("payments", (p) => p.paymentKey === paymentKey),
+  updatePayment: (paymentKey, patch) =>
+    update("payments", (p) => p.paymentKey === paymentKey, patch),
 };

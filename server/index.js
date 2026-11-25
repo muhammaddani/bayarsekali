@@ -16,6 +16,7 @@ import {
   buildRequirements,
   paymentRequiredBody,
   parsePaymentHeader,
+  paymentKeyOf,
   localCheckTransaction,
   facilitatorVerify,
   facilitatorSettle,
@@ -178,6 +179,7 @@ app.get("/api/listings", async (_req, res) => {
             type: "api",
             title: listing.title,
             priceUsdc: listing.priceUsdc,
+            sellerWallet: listing.sellerWallet,
             createdAt: listing.createdAt,
           }
         : {
@@ -185,6 +187,7 @@ app.get("/api/listings", async (_req, res) => {
             type: "file",
             title: listing.title,
             priceSol: listing.priceSol,
+            sellerWallet: listing.sellerWallet,
             createdAt: listing.createdAt,
           }
     );
@@ -265,14 +268,62 @@ async function handleResource(req, res) {
     return res.status(402).json({ error: "Payment rejected: " + local.reason });
   }
 
+  // Replay protection. One signed payment buys exactly one delivery
+  // of exactly one resource. The payment is claimed in the registry
+  // before the facilitator is called, so a captured X-PAYMENT header
+  // can never be spent twice, not even by two requests racing each
+  // other. A claim left pending by a crashed attempt goes stale after
+  // three minutes and may be claimed again; a failed attempt never
+  // spends the payment.
+  const paymentKey = paymentKeyOf(payment.payload.transaction);
+  if (!paymentKey) {
+    return res.status(402).json({ error: "Payment rejected: unreadable transaction" });
+  }
+  const PENDING_STALE_MS = 180_000;
+  const { claimed, record } = await store.claimPayment({
+    paymentKey,
+    listingId: listing.id,
+    status: "pending",
+    signature: null,
+    createdAt: new Date().toISOString(),
+  });
+  if (!claimed) {
+    if (record.status === "settled") {
+      return res.status(402).json({
+        error:
+          record.listingId === listing.id
+            ? "This payment has already been settled. Each payment unlocks exactly one delivery."
+            : "This payment has already been settled for a different resource.",
+      });
+    }
+    if (
+      record.status === "pending" &&
+      Date.now() - Date.parse(record.createdAt) < PENDING_STALE_MS
+    ) {
+      return res
+        .status(409)
+        .json({ error: "This payment is already being settled. Retry shortly." });
+    }
+    await store.updatePayment(paymentKey, {
+      status: "pending",
+      listingId: listing.id,
+      signature: null,
+      createdAt: new Date().toISOString(),
+    });
+  }
+  const markFailed = () =>
+    store.updatePayment(paymentKey, { status: "failed" }).catch(() => {});
+
   let verification;
   try {
     verification = await facilitatorVerify(payment, requirements);
   } catch (err) {
     console.error("facilitator verify failed:", err);
+    await markFailed();
     return res.status(502).json({ error: "Payment verification is unavailable." });
   }
   if (!verification.isValid) {
+    await markFailed();
     return res
       .status(402)
       .json({ error: "Payment invalid: " + (verification.invalidReason || "unknown") });
@@ -283,13 +334,20 @@ async function handleResource(req, res) {
     settlement = await facilitatorSettle(payment, requirements);
   } catch (err) {
     console.error("facilitator settle failed:", err);
+    await markFailed();
     return res.status(502).json({ error: "Payment settlement is unavailable." });
   }
   if (!settlement.success) {
+    await markFailed();
     return res
       .status(502)
       .json({ error: "Payment settlement failed: " + (settlement.errorReason || "unknown") });
   }
+
+  await store.updatePayment(paymentKey, {
+    status: "settled",
+    signature: settlement.transaction || null,
+  });
 
   await store.insertSale({
     id: nanoid(16),

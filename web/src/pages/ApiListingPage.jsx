@@ -355,7 +355,7 @@ export default function ApiListingPage({ listing }) {
         {listing.resourceDescription ? (
           <p className="pitch">{listing.resourceDescription}</p>
         ) : null}
-        <p className="wallet">Seller: {listing.sellerWallet}</p>
+        <p className="wallet">Seller: {listing.sellerWallet} · <a href={`/seller/${listing.sellerWallet}`}>seller dashboard</a></p>
         <label>Paid endpoint, give this URL to any x402 aware agent</label>
         <div className="linkrow">
           <code>{resourceFull}</code>

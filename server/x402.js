@@ -12,6 +12,7 @@
 // at x402.org lists solana devnet (CAIP-2) with its fee payer, and the
 // asset mint is Circle's official devnet USDC (6 decimals).
 
+import { createHash } from "node:crypto";
 import { PublicKey, VersionedTransaction } from "@solana/web3.js";
 import {
   TOKEN_PROGRAM_ID,
@@ -118,6 +119,20 @@ export function paymentRequiredBody({ resourceUrl, description, requirements }) 
     },
     accepts: [requirements],
   };
+}
+
+// A stable identity for one payment transaction: the SHA-256 of its
+// serialized bytes. The same signed payment always produces the same
+// key and any different payment produces a different one, which is
+// what the server's replay registry is keyed on.
+export function paymentKeyOf(transactionBase64) {
+  try {
+    return createHash("sha256")
+      .update(Buffer.from(transactionBase64, "base64"))
+      .digest("hex");
+  } catch {
+    return null;
+  }
 }
 
 // Parse and shape check the X-PAYMENT header. Returns the payload

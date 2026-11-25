@@ -18,6 +18,7 @@ This door implements the x402 v2 `exact` scheme for Solana against the public fa
 - The payment transaction must follow the static verification layout from section 3.1 of the SVM exact scheme spec, in relative order: `SetComputeUnitLimit`, `SetComputeUnitPrice`, a `TransferChecked`, and a Memo instruction carrying a random nonce of at least 16 bytes, hex encoded. Any other shape falls through to the smart wallet path and is rejected.
 - The facilitator pays network fees only. It will not fund account creation, so a missing recipient token account is created first, in a separate transaction paid by the buyer.
 - Settlement is confirmed on chain before the resource is served, and every settled payment is recorded as a sale on the listing.
+- One payment buys exactly one delivery. Every payment transaction is claimed in a server side registry, keyed by the hash of its serialized bytes, before the facilitator is called. A captured `X-PAYMENT` header can never be settled or served twice, not even by two requests racing each other, and a payment settled for one resource can never unlock another.
 
 ## Proof, not promises
 
@@ -27,7 +28,7 @@ Transaction: https://explorer.solana.com/tx/5wXRwLGHiSMq5MQLZJ34vNxgFdGSPJAEWid1
 
 ## The autonomous agent buyer
 
-`server/agent-buy.mjs` is a standalone agent client. It holds its own wallet, discovers the price by asking for the resource, signs the payment itself, and receives the content. No browser, no human in the loop.
+`server/x402-client.mjs` is a reusable buyer library: `payForResource({ resourceUrl, keypair, connection })` runs the whole flow, and `buildPaymentTransaction` exposes the spec shaped transaction builder on its own. On top of it, `server/agent-buy.mjs` is a standalone agent client. It holds its own wallet, discovers the price by asking for the resource, signs the payment itself, and receives the content. No browser, no human in the loop.
 
     cd server
     npm install
@@ -36,6 +37,17 @@ Transaction: https://explorer.solana.com/tx/5wXRwLGHiSMq5MQLZJ34vNxgFdGSPJAEWid1
 Fund the agent wallet with devnet USDC from faucet.circle.com (choose Solana, then Devnet). A little devnet SOL is only needed if a receiving token account has to be created first.
 
 The same flow also runs in the browser: every API listing page carries a step by step agent buyer demo that connects Phantom and settles a payment live.
+
+## Seller dashboard
+
+There are no accounts in BayarSekali; the wallet is the identity. Every listing page links to a public dashboard at `/seller/<wallet>` showing all of that wallet's listings, every settled x402 sale with its explorer link, and the total USDC settled.
+
+## Tests
+
+The payment critical code is pinned by automated tests: money math, payment header parsing, the local transaction check that mirrors the facilitator, and the replay registry semantics. No network, no keys.
+
+    cd server
+    npm test
 
 ## How the human door verifies payments
 
