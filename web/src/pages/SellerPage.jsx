@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ListingSubline } from "../lang.jsx";
 
 const POLL_MS = 4000;
 
@@ -131,6 +132,7 @@ export default function SellerPage({ wallet }) {
                   {listing.type === "api" ? (listing.mode === "proxy" ? "live api" : "x402 api") : "file"}
                 </span>
                 <span className="listing-title">{listing.title}</span>
+                <ListingSubline listing={listing} />
                 <span className="listing-price">
                   {listing.type === "api" ? `${listing.priceUsdc} USDC` : `${listing.priceSol} SOL`}
                   {listing.type === "api" ? ` · ${listing.salesCount} sold` : ""}

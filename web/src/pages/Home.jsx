@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import DemoAgentPanel from "../DemoAgentPanel.jsx";
+import { ListingSubline } from "../lang.jsx";
 
 const REPO_URL = "https://github.com/muhammaddani/bayarsekali";
 
@@ -163,7 +164,10 @@ export default function Home() {
                 <span className={`badge ${l.type === "api" ? "badge-api" : "badge-file"}`}>
                   {l.type === "api" ? (l.mode === "proxy" ? "live api" : "x402 api") : "file"}
                 </span>
-                <span className="title">{l.title}</span>
+                <span className="title">
+                  {l.title}
+                  <ListingSubline listing={l} />
+                </span>
                 <span className="sold">
                   {l.type === "api" ? `${l.salesCount || 0} sold` : "wallet checkout"}
                 </span>
@@ -203,6 +207,11 @@ export default function Home() {
             <pre className="snippet">{`const { data } = await payForResource({
   resourceUrl, keypair, connection,
 });`}</pre>
+            <p className="fineprint">
+              Agents can find every paid resource with its price at{" "}
+              <a href="/.well-known/x402">/.well-known/x402</a>, with a plain text guide at{" "}
+              <a href="/llms.txt">/llms.txt</a>.
+            </p>
           </div>
         </div>
         <p className="fineprint">

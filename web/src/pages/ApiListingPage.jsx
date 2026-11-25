@@ -9,6 +9,7 @@ import {
 } from "@solana/web3.js";
 import { getConnection, waitForConfirmation } from "../solana.js";
 import DemoAgentPanel from "../DemoAgentPanel.jsx";
+import { ListingSubline } from "../lang.jsx";
 
 const MEMO_PROGRAM_ID = new PublicKey(
   "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
@@ -367,6 +368,7 @@ export default function ApiListingPage({ listing }) {
         <a href="/#catalog">Catalog</a> / {isProxy ? "Live API" : "x402 API"}
       </div>
       <h1>{listing.title}</h1>
+      <ListingSubline listing={listing} className="subline subline-head" />
       <div className="listing-layout">
         <div>
           {listing.resourceDescription ? (

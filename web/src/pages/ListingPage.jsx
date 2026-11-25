@@ -7,6 +7,7 @@ import {
 } from "@solana/web3.js";
 import ApiListingPage from "./ApiListingPage.jsx";
 import { getConnection } from "../solana.js";
+import { ListingSubline } from "../lang.jsx";
 
 // The intent id is the buyer's proof of purchase for this browser. It
 // is kept so the buyer can fetch a fresh download link later, after a
@@ -270,6 +271,7 @@ export default function ListingPage({ id }) {
         <a href="/#catalog">Catalog</a> / File
       </div>
       <h1>{listing.title}</h1>
+      <ListingSubline listing={listing} className="subline subline-head" />
       <div className="listing-layout">
         <div>
           <p className="lede">
