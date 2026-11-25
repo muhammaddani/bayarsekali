@@ -182,7 +182,9 @@ server.registerTool(
     description:
       "Pay for one call of an x402 API product with the agent's devnet USDC wallet and return the delivered content. " +
       "The price comes from the server's HTTP 402 answer and is checked against the per purchase limit and the remaining budget before anything is signed. " +
-      "The network fee is paid by the x402 facilitator. Give listing_id for a BayarSekali product, or resource_url for any x402 Solana devnet resource.",
+      "The network fee is paid by the x402 facilitator. Give listing_id for a BayarSekali product, or resource_url for any x402 Solana devnet resource. " +
+      "Gateway products (mode proxy in get_product) forward each paid call to the seller's live API; pass its parameters in query. " +
+      "A gateway call is only charged when the seller's API answers successfully.",
     inputSchema: {
       listing_id: z.string().min(1).optional().describe("A BayarSekali API listing id."),
       resource_url: z
@@ -190,18 +192,27 @@ server.registerTool(
         .url()
         .optional()
         .describe("Any x402 resource URL (Solana devnet, USDC, exact scheme)."),
+      query: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe("Query parameters for a gateway API product, for example {\"city\": \"Jakarta\"}."),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
-  async ({ listing_id, resource_url }) => {
+  async ({ listing_id, resource_url, query }) => {
     if (!keypair) {
       return fail("No agent wallet configured. Set AGENT_KEYPAIR to a Solana keypair file to buy.");
     }
     if (!!listing_id === !!resource_url) {
       return fail("Give exactly one of listing_id or resource_url.");
     }
-    const url = resource_url || `${BASE_URL}/api/resource/${encodeURIComponent(listing_id)}`;
+    let url = resource_url || `${BASE_URL}/api/resource/${encodeURIComponent(listing_id)}`;
     if (!/^https?:\/\//.test(url)) return fail("resource_url must be an http(s) URL.");
+    if (query && Object.keys(query).length) {
+      const withQuery = new URL(url);
+      for (const [k, v] of Object.entries(query)) withQuery.searchParams.set(k, v);
+      url = withQuery.toString();
+    }
 
     let ticket = null;
     let sent = false;

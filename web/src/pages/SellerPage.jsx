@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+const POLL_MS = 4000;
 
 function explorerTx(signature) {
   return `https://explorer.solana.com/tx/${signature}?cluster=devnet`;
@@ -9,105 +11,136 @@ function shortAddress(address) {
   return address.slice(0, 6) + "…" + address.slice(-6);
 }
 
-// Public seller dashboard: every listing owned by one wallet, with
-// the settled x402 sales per listing and the totals. There are no
-// accounts in BayarSekali; the wallet address is the identity.
+function timeAgo(iso) {
+  const seconds = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+// Public seller dashboard, live: every listing owned by one wallet and
+// every settled x402 sale, refreshed every few seconds while the tab is
+// visible. A sale that lands while the page is open is highlighted.
+// There are no accounts in BayarSekali; the wallet is the identity.
 export default function SellerPage({ wallet }) {
-  const [rows, setRows] = useState(null);
+  const [data, setData] = useState(null);
   const [error, setError] = useState("");
+  const [fresh, setFresh] = useState(() => new Set());
+  const known = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    let timer = null;
+
+    async function load() {
       try {
-        const res = await fetch("/api/listings");
-        if (!res.ok) throw new Error(String(res.status));
-        const data = await res.json();
-        const mine = (data.listings || []).filter((l) => l.sellerWallet === wallet);
-        const withSales = await Promise.all(
-          mine.map(async (listing) => {
-            let sales = [];
-            try {
-              const sres = await fetch(`/api/listings/${listing.id}/sales`);
-              if (sres.ok) sales = (await sres.json()).sales || [];
-            } catch {
-              sales = [];
-            }
-            return { listing, sales };
-          })
-        );
-        if (!cancelled) setRows(withSales);
-      } catch {
+        const res = await fetch(`/api/sellers/${encodeURIComponent(wallet)}`);
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error || String(res.status));
+        if (cancelled) return;
+        const ids = body.sales.map((s) => s.id);
+        if (known.current) {
+          const arrived = ids.filter((id) => !known.current.has(id));
+          if (arrived.length) {
+            setFresh(new Set(arrived));
+            setTimeout(() => !cancelled && setFresh(new Set()), 6000);
+          }
+        }
+        known.current = new Set(ids);
+        setData(body);
+        setError("");
+      } catch (err) {
         if (!cancelled) setError("The dashboard could not be loaded right now.");
       }
-    })();
+    }
+
+    function schedule() {
+      timer = setTimeout(async () => {
+        if (document.visibilityState === "visible") await load();
+        if (!cancelled) schedule();
+      }, POLL_MS);
+    }
+
+    load().then(schedule);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [wallet]);
 
-  const totalUsdc = (rows || []).reduce(
-    (sum, row) =>
-      sum +
-      row.sales.reduce((s, sale) => s + (parseFloat(sale.amountUsdc) || 0), 0),
-    0
-  );
-  const totalSales = (rows || []).reduce((sum, row) => sum + row.sales.length, 0);
-
   return (
     <div>
+      <div className="crumbs">
+        <a href="/#catalog">Catalog</a> / Seller
+      </div>
       <h1>Seller dashboard</h1>
       <p className="wallet">{wallet}</p>
       {error && <div className="status err">{error}</div>}
-      {rows === null && !error && <p className="pitch">Loading…</p>}
-      {rows !== null && rows.length === 0 && (
+      {data === null && !error && <p className="pitch">Loading…</p>}
+      {data !== null && data.listings.length === 0 && (
         <p className="pitch">This wallet has no listings yet.</p>
       )}
-      {rows !== null && rows.length > 0 && (
+      {data !== null && data.listings.length > 0 && (
         <>
-          <div className="card">
-            <div className="price">{totalUsdc.toFixed(2)} USDC</div>
+          <div className={"card" + (fresh.size ? " pulse" : "")}>
+            <span className="live-dot">live</span>
+            <div className="price">{data.totals.usdc} USDC</div>
             <p className="pitch">
-              settled through the x402 door across {totalSales} sale
-              {totalSales === 1 ? "" : "s"} and {rows.length} listing
-              {rows.length === 1 ? "" : "s"}. File sales in SOL settle
-              straight to the wallet and are visible on chain.
+              settled through x402 across {data.totals.salesCount} sale
+              {data.totals.salesCount === 1 ? "" : "s"} and {data.listings.length} listing
+              {data.listings.length === 1 ? "" : "s"}, straight to this wallet. File sales in
+              SOL settle directly on chain as well.
             </p>
           </div>
-          {rows.map(({ listing, sales }) => (
-            <div className="card" key={listing.id}>
-              <span className={`badge ${listing.type === "api" ? "badge-api" : "badge-file"}`}>
-                {listing.type === "api" ? "API access, x402" : "File download"}
-              </span>
-              <h2>
-                <a href={`/listing/${listing.id}`}>{listing.title}</a>
-              </h2>
+
+          <div className="card">
+            <h2>Sales feed</h2>
+            {data.sales.length === 0 ? (
               <p className="pitch">
-                Price{" "}
-                {listing.type === "api"
-                  ? `${listing.priceUsdc} USDC`
-                  : `${listing.priceSol} SOL`}
-                {" · "}
-                {sales.length} settled sale{sales.length === 1 ? "" : "s"}
+                No x402 sales yet. Open any API listing and let the demo agent buy it, then
+                watch it land here.
               </p>
-              {sales.map((sale) => (
-                <p className="wallet" key={sale.id}>
-                  {sale.amountUsdc} USDC from {shortAddress(sale.payer)} ·{" "}
-                  {new Date(sale.createdAt).toLocaleString()}{" "}
-                  {sale.signature && (
-                    <a href={explorerTx(sale.signature)} target="_blank" rel="noreferrer">
-                      view transaction
-                    </a>
-                  )}
-                </p>
-              ))}
-            </div>
-          ))}
+            ) : (
+              data.sales.slice(0, 25).map((sale) => (
+                <div className={"sale-row" + (fresh.has(sale.id) ? " fresh" : "")} key={sale.id}>
+                  <strong>{sale.amountUsdc} USDC</strong> for{" "}
+                  <a href={`/listing/${sale.listingId}`}>{sale.listingTitle}</a>
+                  <span className="wallet">
+                    {" "}
+                    from {shortAddress(sale.payer)} · {timeAgo(sale.createdAt)}
+                    {sale.signature && (
+                      <>
+                        {" · "}
+                        <a href={explorerTx(sale.signature)} target="_blank" rel="noreferrer">
+                          transaction
+                        </a>
+                      </>
+                    )}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+
+          <h2 className="section-title">Listings</h2>
+          <div className="grid">
+            {data.listings.map((listing) => (
+              <a className="listing-card" key={listing.id} href={`/listing/${listing.id}`}>
+                <span className={`badge ${listing.type === "api" ? "badge-api" : "badge-file"}`}>
+                  {listing.type === "api" ? (listing.mode === "proxy" ? "live api" : "x402 api") : "file"}
+                </span>
+                <span className="listing-title">{listing.title}</span>
+                <span className="listing-price">
+                  {listing.type === "api" ? `${listing.priceUsdc} USDC` : `${listing.priceSol} SOL`}
+                  {listing.type === "api" ? ` · ${listing.salesCount} sold` : ""}
+                </span>
+              </a>
+            ))}
+          </div>
         </>
       )}
-      <p style={{ marginTop: 20 }}>
-        <a href="/">Back to the catalog</a>
-      </p>
+
     </div>
   );
 }

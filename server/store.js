@@ -14,6 +14,7 @@ const FILES = {
   tokens: path.join(DATA_DIR, "tokens.json"),
   sales: path.join(DATA_DIR, "sales.json"),
   payments: path.join(DATA_DIR, "payments.json"),
+  demoRuns: path.join(DATA_DIR, "demo-runs.json"),
 };
 
 async function ensureDataDir() {
@@ -153,6 +154,12 @@ export const store = {
     update("tokens", (t) => t.token === value, { used: false }),
 
   insertSale: (sale) => insert("sales", sale),
+  listSales: () => readCollection("sales"),
+
+  // Purchases made by the server's judge mode demo agent; the daily
+  // demo budget is counted from these.
+  insertDemoRun: (run) => insert("demoRuns", run),
+  listDemoRuns: () => readCollection("demoRuns"),
   getSalesByListing: async (listingId) => {
     const rows = await readCollection("sales");
     return rows.filter((s) => s.listingId === listingId);

@@ -11,6 +11,18 @@ import { nanoid } from "nanoid";
 import { store } from "./store.js";
 import { rateLimit } from "./ratelimit.js";
 import { createChallengeStore } from "./auth.js";
+import { createDemoAgent, DemoRefusal } from "./demo.js";
+import { atomicToUsdc } from "./spend-guard.mjs";
+import dns from "node:dns/promises";
+import {
+  fetchUpstream,
+  isPublicAddress,
+  mergeQuery,
+  upstreamData,
+  validateSecretHeader,
+  validateUpstreamUrl,
+} from "./upstream.js";
+import { readFileSync } from "node:fs";
 import { verifyPayment, solToLamports, getConnection } from "./verify.js";
 import {
   X402_VERSION,
@@ -140,6 +152,74 @@ app.post(
   }
 );
 
+// Judge mode: a server side demo agent buys an API product through the
+// real x402 flow and streams every step to the page, so visitors can
+// watch an agent pay on chain without a wallet. Enabled only when
+// DEMO_AGENT_KEYPAIR points at a funded devnet keypair file.
+function loadDemoAgent() {
+  const keypairPath = process.env.DEMO_AGENT_KEYPAIR;
+  if (!keypairPath) return null;
+  try {
+    const secret = Uint8Array.from(JSON.parse(readFileSync(keypairPath, "utf8")));
+    return createDemoAgent({
+      keypair: Keypair.fromSecretKey(secret),
+      connection: getConnection(),
+      store,
+      // The agent buys from this very server over loopback.
+      resourceBase: "http://127.0.0.1:" + PORT,
+      displayBase: PUBLIC_BASE_URL || "http://127.0.0.1:" + PORT,
+      maxPerPurchaseUsdc: process.env.DEMO_MAX_PER_PURCHASE_USDC || "0.05",
+      dailyBudgetUsdc: process.env.DEMO_DAILY_BUDGET_USDC || "1",
+      allowedSellers: (process.env.DEMO_ALLOWED_SELLERS || "").split(",").map((s) => s.trim()),
+    });
+  } catch (err) {
+    console.error("demo agent disabled:", err.message);
+    return null;
+  }
+}
+const demoAgent = loadDemoAgent();
+
+app.get("/api/demo/status", async (_req, res) => {
+  if (!demoAgent) return res.json({ enabled: false });
+  return res.json(await demoAgent.status());
+});
+
+// Streams Server-Sent Events (read with fetch, not EventSource, since
+// this is a POST): step events while the agent works, then one "done"
+// or "error" event.
+app.post(
+  "/api/demo/agent-buy",
+  rateLimit({
+    windowMs: 60 * 60_000,
+    max: 6,
+    message: "You have run the demo agent several times this hour. Try again later.",
+  }),
+  async (req, res) => {
+    if (!demoAgent) return res.status(404).json({ error: "The demo agent is not enabled here." });
+    const { listingId } = req.body || {};
+    const listing = typeof listingId === "string" ? await store.getListing(listingId) : null;
+    if (!listing || listing.type !== "api") {
+      return res.status(400).json({ error: "Pick an API listing for the demo agent to buy." });
+    }
+    res.status(200).set({
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    });
+    res.flushHeaders();
+    const send = (event) => res.write("data: " + JSON.stringify(event) + "\n\n");
+    try {
+      send({ type: "step", step: "start", message: `wants "${listing.title}"` });
+      const result = await demoAgent.run(listing.id, send);
+      send({ type: "done", ...result });
+    } catch (err) {
+      if (!(err instanceof DemoRefusal)) console.error("demo agent run failed:", err.message);
+      send({ type: "error", message: err.message });
+    }
+    res.end();
+  }
+);
+
 // Seller sign in. The seller's wallet signs this one time message
 // (free, no transaction) and the signature goes along with the new
 // listing, proving the wallet that will receive the money is theirs.
@@ -197,7 +277,14 @@ app.post("/api/listings", listingLimiter, upload.single("file"), async (req, res
     }
 
     if (type === "api") {
-      const { priceUsdc, resourceContent, resourceDescription } = req.body || {};
+      const {
+        priceUsdc,
+        resourceContent,
+        resourceDescription,
+        upstreamUrl,
+        secretHeaderName,
+        secretHeaderValue,
+      } = req.body || {};
       if (!title || typeof title !== "string" || !title.trim()) {
         return res.status(400).json({ error: "Title is required." });
       }
@@ -211,14 +298,36 @@ app.post("/api/listings", listingLimiter, upload.single("file"), async (req, res
           .status(400)
           .json({ error: "sellerWallet must be a valid Solana address." });
       }
-      if (
-        typeof resourceContent !== "string" ||
-        !resourceContent.trim() ||
-        resourceContent.length > 64 * 1024
-      ) {
-        return res
-          .status(400)
-          .json({ error: "resourceContent must be a non-empty string of at most 64 KB." });
+      // Two ways to deliver: fixed content stored here, or the gateway
+      // mode, where every paid call is forwarded to the seller's own API.
+      let delivery;
+      if (typeof upstreamUrl === "string" && upstreamUrl.trim()) {
+        try {
+          const url = validateUpstreamUrl(upstreamUrl.trim());
+          const addresses = await dns.lookup(url.hostname.replace(/^\[|\]$/g, ""), { all: true });
+          if (!addresses.length || addresses.some((a) => !isPublicAddress(a.address))) {
+            throw new Error("The API URL must point to a public address.");
+          }
+          delivery = {
+            mode: "proxy",
+            upstreamUrl: url.toString(),
+            secretHeader: validateSecretHeader(secretHeaderName, secretHeaderValue),
+          };
+        } catch (err) {
+          const reason = err.code === "ENOTFOUND" ? "The API host could not be found." : err.message;
+          return res.status(400).json({ error: reason });
+        }
+      } else {
+        if (
+          typeof resourceContent !== "string" ||
+          !resourceContent.trim() ||
+          resourceContent.length > 64 * 1024
+        ) {
+          return res.status(400).json({
+            error: "Give resourceContent (a non-empty string of at most 64 KB) or an upstreamUrl.",
+          });
+        }
+        delivery = { mode: "static", resourceContent };
       }
       const listing = {
         id: nanoid(12),
@@ -226,7 +335,7 @@ app.post("/api/listings", listingLimiter, upload.single("file"), async (req, res
         title: title.trim(),
         priceUsdc: String(priceUsdc).trim(),
         sellerWallet,
-        resourceContent,
+        ...delivery,
         resourceDescription:
           typeof resourceDescription === "string" ? resourceDescription : "",
         createdAt: new Date().toISOString(),
@@ -284,31 +393,90 @@ app.post("/api/listings", listingLimiter, upload.single("file"), async (req, res
 
 // Public catalog. Only display fields leave the server: never the
 // stored file name, never an API product's resourceContent.
+function publicListing(listing) {
+  return listing.type === "api"
+    ? {
+        id: listing.id,
+        type: "api",
+        title: listing.title,
+        priceUsdc: listing.priceUsdc,
+        sellerWallet: listing.sellerWallet,
+        mode: listing.mode === "proxy" ? "proxy" : "static",
+        createdAt: listing.createdAt,
+      }
+    : {
+        id: listing.id,
+        type: "file",
+        title: listing.title,
+        priceSol: listing.priceSol,
+        sellerWallet: listing.sellerWallet,
+        createdAt: listing.createdAt,
+      };
+}
+
 app.get("/api/listings", async (_req, res) => {
   const listings = await store.listListings();
+  const sold = new Map();
+  for (const sale of await store.listSales()) {
+    sold.set(sale.listingId, (sold.get(sale.listingId) || 0) + 1);
+  }
   const publicListings = listings
     .slice()
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
-    .map((listing) =>
-      listing.type === "api"
-        ? {
-            id: listing.id,
-            type: "api",
-            title: listing.title,
-            priceUsdc: listing.priceUsdc,
-            sellerWallet: listing.sellerWallet,
-            createdAt: listing.createdAt,
-          }
-        : {
-            id: listing.id,
-            type: "file",
-            title: listing.title,
-            priceSol: listing.priceSol,
-            sellerWallet: listing.sellerWallet,
-            createdAt: listing.createdAt,
-          }
-    );
+    .map((l) => ({ ...publicListing(l), salesCount: sold.get(l.id) || 0 }));
   return res.json({ listings: publicListings });
+});
+
+// Recent settled x402 sales across the whole marketplace, newest first:
+// real on chain proof for the home page. Everything here is already
+// public on chain.
+app.get("/api/activity", async (_req, res) => {
+  const titles = new Map((await store.listListings()).map((l) => [l.id, l.title]));
+  const sales = (await store.listSales())
+    .filter((s) => titles.has(s.listingId))
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .slice(0, 8)
+    .map((s) => ({
+      id: s.id,
+      listingId: s.listingId,
+      title: titles.get(s.listingId),
+      amountUsdc: s.amountUsdc,
+      payer: s.payer,
+      signature: s.signature,
+      createdAt: s.createdAt,
+    }));
+  return res.json({ sales });
+});
+
+// Public seller dashboard data in one call, cheap enough to poll: the
+// wallet's listings, every settled x402 sale newest first, and the
+// exact USDC total (summed in atomic units, never floats).
+app.get("/api/sellers/:wallet", async (req, res) => {
+  const wallet = req.params.wallet;
+  if (!isValidWallet(wallet)) {
+    return res.status(400).json({ error: "Not a valid Solana address." });
+  }
+  const listings = (await store.listListings())
+    .filter((l) => l.sellerWallet === wallet)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  const byId = new Map(listings.map((l) => [l.id, l]));
+  const sales = (await store.listSales())
+    .filter((s) => byId.has(s.listingId))
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .map((s) => ({ ...s, listingTitle: byId.get(s.listingId).title }));
+  const totalAtomic = sales.reduce(
+    (sum, s) => sum + BigInt(usdcToAtomic(String(s.amountUsdc)) || "0"),
+    0n
+  );
+  return res.json({
+    wallet,
+    listings: listings.map((l) => ({
+      ...publicListing(l),
+      salesCount: sales.filter((s) => s.listingId === l.id).length,
+    })),
+    sales,
+    totals: { usdc: atomicToUsdc(totalAtomic), salesCount: sales.length },
+  });
 });
 
 // Public listing info. The stored file name and path are never
@@ -325,6 +493,9 @@ app.get("/api/listings/:id", async (req, res) => {
       sellerWallet: listing.sellerWallet,
       resourceUrl: "/api/resource/" + listing.id,
       resourceDescription: listing.resourceDescription || "",
+      // Gateway listings forward each paid call to the seller's API; the
+      // URL and any secret header never leave the server.
+      mode: listing.mode === "proxy" ? "proxy" : "static",
       createdAt: listing.createdAt,
     });
   }
@@ -434,6 +605,24 @@ async function handleResource(req, res) {
       return null;
     });
 
+  // Gateway listings: call the seller's API after the payment is
+  // verified and before it is settled, so a buyer is charged only for a
+  // call that the seller's API answered successfully.
+  const isProxy = listing.mode === "proxy";
+  let upstream = null;
+  const callUpstream = async () => {
+    try {
+      const answer = await fetchUpstream({
+        url: mergeQuery(listing.upstreamUrl, req.query).toString(),
+        secretHeader: listing.secretHeader || null,
+      });
+      return answer.ok ? { ok: true, answer } : { ok: false, reason: "it answered HTTP " + answer.status };
+    } catch (err) {
+      console.error("upstream call failed for", listing.id + ":", err.message);
+      return { ok: false, reason: err.code === "EUPSTREAM_PRIVATE" ? "its address is not public" : "it did not answer" };
+    }
+  };
+
   let verification = null;
   let settlement = null;
   // Any earlier attempt (broken off, crashed, or refused after it may
@@ -458,6 +647,16 @@ async function handleResource(req, res) {
       return res
         .status(402)
         .json({ error: "Payment invalid: " + (verification.invalidReason || "unknown") });
+    }
+
+    if (isProxy) {
+      upstream = await callUpstream();
+      if (!upstream.ok) {
+        await markFailed();
+        return res.status(502).json({
+          error: `The seller's API could not deliver (${upstream.reason}). Your payment was not settled, so you were not charged.`,
+        });
+      }
     }
 
     try {
@@ -502,10 +701,23 @@ async function handleResource(req, res) {
 
   res.set("X-PAYMENT-RESPONSE", paymentResponseHeader(settlement));
   let data;
-  try {
-    data = JSON.parse(listing.resourceContent);
-  } catch {
-    data = listing.resourceContent;
+  if (isProxy) {
+    // A payment found already settled from an earlier attempt has not
+    // called the API yet in this request.
+    if (!upstream) upstream = await callUpstream();
+    if (!upstream.ok) {
+      return res.status(502).json({
+        error: `Your payment had already settled, but the seller's API could not deliver (${upstream.reason}). Contact the seller with transaction ${settlement.transaction || "unknown"}.`,
+        payment: { transaction: settlement.transaction || null },
+      });
+    }
+    data = upstreamData(upstream.answer);
+  } else {
+    try {
+      data = JSON.parse(listing.resourceContent);
+    } catch {
+      data = listing.resourceContent;
+    }
   }
   return res.json({
     data,

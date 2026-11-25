@@ -10,6 +10,10 @@ export default function CreateListing() {
   const [file, setFile] = useState(null);
   const [resourceDescription, setResourceDescription] = useState("");
   const [resourceContent, setResourceContent] = useState("");
+  const [delivery, setDelivery] = useState("static");
+  const [upstreamUrl, setUpstreamUrl] = useState("");
+  const [secretHeaderName, setSecretHeaderName] = useState("");
+  const [secretHeaderValue, setSecretHeaderValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
@@ -55,7 +59,9 @@ export default function CreateListing() {
             priceUsdc,
             sellerWallet,
             resourceDescription,
-            resourceContent,
+            ...(delivery === "proxy"
+              ? { upstreamUrl, secretHeaderName, secretHeaderValue }
+              : { resourceContent }),
             ...auth,
           }),
         });
@@ -96,6 +102,9 @@ export default function CreateListing() {
 
   return (
     <div>
+      <div className="crumbs">
+        <a href="/">Home</a> / Sell
+      </div>
       <h1>Create a listing</h1>
       <p className="pitch">
         Sell a downloadable file for devnet SOL, or sell API access per call
@@ -191,17 +200,74 @@ export default function CreateListing() {
               onChange={(e) => setResourceDescription(e.target.value)}
               placeholder="Example: One premium data report, delivered per paid call"
             />
-            <label htmlFor="content">
-              Content delivered after payment (text or JSON, at most 64 KB)
-            </label>
-            <textarea
-              id="content"
-              value={resourceContent}
-              onChange={(e) => setResourceContent(e.target.value)}
-              placeholder='{"report": "your paid content here"}'
-              rows={8}
-              required
-            />
+            <label>What a paid call delivers</label>
+            <div className="segrow">
+              <button
+                type="button"
+                className={delivery === "static" ? "" : "secondary"}
+                onClick={() => setDelivery("static")}
+              >
+                Fixed content
+              </button>
+              <button
+                type="button"
+                className={delivery === "proxy" ? "" : "secondary"}
+                onClick={() => setDelivery("proxy")}
+              >
+                My live API
+              </button>
+            </div>
+            {delivery === "static" ? (
+              <>
+                <label htmlFor="content">
+                  Content delivered after payment (text or JSON, at most 64 KB)
+                </label>
+                <textarea
+                  id="content"
+                  value={resourceContent}
+                  onChange={(e) => setResourceContent(e.target.value)}
+                  placeholder='{"report": "your paid content here"}'
+                  rows={8}
+                  required
+                />
+              </>
+            ) : (
+              <>
+                <p className="pitch">
+                  Turn an API you already run into a paid x402 API. Every paid call is
+                  forwarded to your URL with the buyer's query parameters, and the buyer is
+                  only charged when your API answers successfully. Your URL and secret never
+                  leave the server.
+                </p>
+                <label htmlFor="upstream">Your API URL (https)</label>
+                <input
+                  id="upstream"
+                  type="url"
+                  value={upstreamUrl}
+                  onChange={(e) => setUpstreamUrl(e.target.value)}
+                  placeholder="https://api.example.com/v1/prices?region=jakarta"
+                  required
+                />
+                <label htmlFor="hname">Secret header name (optional, for example Authorization)</label>
+                <input
+                  id="hname"
+                  type="text"
+                  value={secretHeaderName}
+                  onChange={(e) => setSecretHeaderName(e.target.value)}
+                  placeholder="Authorization"
+                  autoComplete="off"
+                />
+                <label htmlFor="hvalue">Secret header value (optional)</label>
+                <input
+                  id="hvalue"
+                  type="password"
+                  value={secretHeaderValue}
+                  onChange={(e) => setSecretHeaderValue(e.target.value)}
+                  placeholder="Bearer your-api-key"
+                  autoComplete="off"
+                />
+              </>
+            )}
           </>
         )}
         <button type="submit" disabled={busy}>

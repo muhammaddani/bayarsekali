@@ -8,6 +8,7 @@ import {
   VersionedTransaction,
 } from "@solana/web3.js";
 import { getConnection, waitForConfirmation } from "../solana.js";
+import DemoAgentPanel from "../DemoAgentPanel.jsx";
 
 const MEMO_PROGRAM_ID = new PublicKey(
   "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
@@ -241,24 +242,24 @@ function AgentBuyer({ listing, onPaid }) {
 
   return (
     <div className="card">
-      <h2>Agent buyer demo</h2>
+      <h3>Pay from your own wallet</h3>
       <p className="pitch">
-        This panel is an autonomous buyer for the demo. It speaks the x402
-        protocol end to end: no checkout page, no account, just HTTP and a
-        signed payment. Your wallet only signs; the x402 facilitator pays the
-        network fee. Phantom must be set to Devnet and hold devnet USDC from
-        faucet.circle.com.
+        Run the same x402 flow in this browser with Phantom as the agent's wallet. Phantom
+        must be on Devnet and hold devnet USDC from faucet.circle.com. Your wallet only
+        signs; the facilitator pays the network fee.
       </p>
       {walletAddress ? (
         <p className="wallet">Agent wallet: {walletAddress}</p>
       ) : (
-        <button type="button" onClick={connectWallet}>
-          Connect Wallet
+        <button type="button" className="secondary" onClick={connectWallet}>
+          Connect Phantom
         </button>
       )}
-      <button type="button" onClick={runAgent} disabled={busy || !walletAddress}>
-        {busy ? "Agent is working..." : "Run the agent buyer"}
-      </button>
+      {walletAddress ? (
+        <button type="button" onClick={runAgent} disabled={busy}>
+          {busy ? "Paying…" : "Pay with Phantom"}
+        </button>
+      ) : null}
       {log.length ? (
         <div className="status log">
           {log.map((line, i) => (
@@ -305,16 +306,27 @@ function SalesPanel({ listing, refreshKey }) {
     load();
   }, [load, refreshKey]);
 
+  // Keep the list live while the page is open, so a sale made by any
+  // agent anywhere shows up here within seconds.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [load]);
+
   if (!sales) return null;
   const total = sales.reduce((sum, s) => sum + Number(s.amountUsdc || 0), 0);
   return (
     <div className="card">
-      <h2>Sales</h2>
+      <h3>
+        Sales <span className="live-dot">live</span>
+      </h3>
       <p className="pitch">
-        {sales.length} settled x402 payment{sales.length === 1 ? "" : "s"}
+        {sales.length} settled payment{sales.length === 1 ? "" : "s"}
         {sales.length ? ", " + total.toFixed(6).replace(/\.?0+$/, "") + " USDC in total" : ""}.
       </p>
-      {sales.map((sale) => (
+      {sales.slice().reverse().slice(0, 10).map((sale) => (
         <p className="wallet" key={sale.id}>
           {sale.amountUsdc} USDC from {shortAddress(sale.payer)} at{" "}
           {new Date(sale.createdAt).toLocaleString()}
@@ -334,30 +346,73 @@ function SalesPanel({ listing, refreshKey }) {
 
 export default function ApiListingPage({ listing }) {
   const [refreshKey, setRefreshKey] = useState(0);
+  const [copied, setCopied] = useState(false);
   const resourceFull = window.location.origin + "/api/resource/" + listing.id;
+  const isProxy = listing.mode === "proxy";
+  const paid = () => setRefreshKey((k) => k + 1);
+
+  async function copyEndpoint() {
+    try {
+      await navigator.clipboard.writeText(resourceFull);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  }
 
   return (
-    <div>
-      <h1>{listing.title}</h1>
-      <div className="card">
-        <div className="price">{listing.priceUsdc} USDC</div>
-        <p className="pitch">
-          API access sold per call through the x402 protocol on Solana devnet.
-          The buyer receives an HTTP 402 with the payment requirements, pays in
-          devnet USDC, and the content below unlocks the moment the payment
-          settles on chain. Devnet USDC has no real value.
-        </p>
-        {listing.resourceDescription ? (
-          <p className="pitch">{listing.resourceDescription}</p>
-        ) : null}
-        <p className="wallet">Seller: {listing.sellerWallet} · <a href={`/seller/${listing.sellerWallet}`}>seller dashboard</a></p>
-        <label>Paid endpoint, give this URL to any x402 aware agent</label>
-        <div className="linkrow">
-          <code>{resourceFull}</code>
-        </div>
+    <>
+      <div className="crumbs">
+        <a href="/#catalog">Catalog</a> / {isProxy ? "Live API" : "x402 API"}
       </div>
-      <AgentBuyer listing={listing} onPaid={() => setRefreshKey((k) => k + 1)} />
-      <SalesPanel listing={listing} refreshKey={refreshKey} />
-    </div>
+      <h1>{listing.title}</h1>
+      <div className="listing-layout">
+        <div>
+          {listing.resourceDescription ? (
+            <p className="lede">{listing.resourceDescription}</p>
+          ) : null}
+          <p className="pitch">
+            {isProxy
+              ? "Each paid call is forwarded to the seller's own API, query parameters included. You are charged only when that API answers successfully."
+              : "Sold per call over x402. A paid request returns the content in the same response, once the USDC payment settles on Solana."}
+          </p>
+
+          <div className="card">
+            <h3>Endpoint for agents</h3>
+            <p className="pitch">Any x402 client can pay this URL directly, no page visit needed.</p>
+            <div className="linkrow">
+              <code>{resourceFull}</code>
+              <button type="button" className="secondary" onClick={copyEndpoint}>
+                {copied ? "Copied" : "Copy"}
+              </button>
+            </div>
+          </div>
+
+          <SalesPanel listing={listing} refreshKey={refreshKey} />
+          <AgentBuyer listing={listing} onPaid={paid} />
+        </div>
+
+        <aside className="buybox">
+          <div className="card">
+            <div className="price">
+              {listing.priceUsdc} USDC <small>per call</small>
+            </div>
+            <dl className="meta-list">
+              <dt>Network</dt>
+              <dd>Solana devnet</dd>
+              <dt>Seller</dt>
+              <dd>
+                <a href={`/seller/${listing.sellerWallet}`}>{shortAddress(listing.sellerWallet)}</a>
+              </dd>
+              <dt>Fee</dt>
+              <dd>paid by the facilitator</dd>
+            </dl>
+          </div>
+          <div className="divider-label">watch an agent pay for it</div>
+          <DemoAgentPanel listingId={listing.id} onPaid={paid} />
+        </aside>
+      </div>
+    </>
   );
 }
